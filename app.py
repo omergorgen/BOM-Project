@@ -37,21 +37,15 @@ GEMINI_API_KEY = secret_veya_env("GEMINI_API_KEY")
 NEXAR_CLIENT_ID = secret_veya_env("NEXAR_CLIENT_ID")
 NEXAR_CLIENT_SECRET = secret_veya_env("NEXAR_CLIENT_SECRET")
 
-# Gemini model adı: Google zaman zaman model isimlerini değiştirip eskilerini
-# emekliye ayırıyor. Buraya yazacağınız ismi Google AI Studio / API
-# dokümantasyonundan güncel olarak teyit edin (genai.list_models() ile de
-# hesabınızın erişebildiği modelleri görebilirsiniz).
+
 GEMINI_MODEL_NAME = "gemini-3.6-flash"
 
 REQUIRED_COLUMNS = ["MPN", "Manufacturer", "Description", "Qty", "RefDes"]
 
-# ============================================================
-# NEXAR (OCTOPART) API — TÜM ALTERNATİF TEDARİKÇİLERDEN FİYAT + STOK
-# ============================================================
-# Nexar, tek bir sorguda Mouser, Digi-Key, Arrow, Farnell, LCSC gibi onlarca
-# tedarikçinin fiyat/stok verisini aynı anda döndüren bir "toplayıcı" API'dir.
+
+
 # Ücretsiz Client ID / Client Secret için: https://nexar.com/
-# (Uygulamalar > uygulamanız > Yetkilendirme sekmesinden alınır.)
+
 
 NEXAR_TOKEN_URL = "https://identity.nexar.com/connect/token"
 NEXAR_GRAPHQL_URL = "https://api.nexar.com/graphql"
@@ -93,10 +87,8 @@ def nexar_token_al() -> str:
                 "grant_type": "client_credentials",
                 "client_id": NEXAR_CLIENT_ID,
                 "client_secret": NEXAR_CLIENT_SECRET,
-                # NOT: "scope" parametresi kasıtlı olarak gönderilmiyor.
-                # Nexar uygulamanızın kapsamı (Supply) zaten panelde
-                # Client ID/Secret'a bağlı; burada scope="supply" göndermek
-                # "invalid_scope" hatasına yol açıyor.
+                # NOT: "scope" parametresi kasıtlı olarak gönderilmiyor. eklendiğğinde invslid_scope hatası verdi.
+                
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=10,
@@ -182,7 +174,7 @@ def nexar_parca_sorgula(mpn: str) -> dict:
                 teklif.get("clickUrl", ""),
             ))
 
-    teklifler.sort(key=lambda t: (t[1] is None, t[1]))  # en ucuzdan pahalıya
+    teklifler.sort(key=lambda t: (t[1] is None, t[1])) 
 
     return {
         "bulundu": True,
@@ -219,7 +211,7 @@ def toplu_nexar_sorgula(mpn_listesi, max_workers: int = 5) -> dict:
 
 
 def risk_hesapla(nexar_sonucu: dict) -> int:
-    """Basit, Nexar verisine dayalı risk skoru:
+    """ Nexar verisine dayalı risk skoru:
     - Parça hiç bulunamadıysa veya API hatası varsa -> yüksek risk
     - Bulundu ama hiçbir tedarikçide stok yoksa -> orta-yüksek risk
     - Az sayıda tedarikçide (1) stok varsa -> orta risk
@@ -242,9 +234,9 @@ def risk_hesapla(nexar_sonucu: dict) -> int:
     return 10  # birden fazla stoklu tedarikçi -> güvenli
 
 
-# ============================================================
+
 # ARAYÜZ VE ANALİZ
-# ============================================================
+
 st.title("BOM (Bill of Materials) Analiz Aracı")
 st.write(
     "Bu uygulama, Nexar (Octopart) API'si ve LLM (Yapay Zeka) kullanarak BOM "
