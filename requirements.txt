@@ -3,3 +3,6 @@ pandas
 requests
 google-generativeai
 openpyxl
+concurrent.futures
+time
+os

@@ -7,9 +7,9 @@ import pandas as pd
 import requests
 import google.generativeai as genai
 
-# ============================================================
+
 # AYARLAR VE API ANAHTARLARI
-# ============================================================
+
 # GÜVENLİK: Anahtarları kodun içine ASLA yazmayın.
 # Yerelde çalışırken .streamlit/secrets.toml dosyasına şunu ekleyin:
 #
@@ -36,18 +36,14 @@ def secret_veya_env(anahtar: str) -> str:
 GEMINI_API_KEY = secret_veya_env("GEMINI_API_KEY")
 MOUSER_API_KEY = secret_veya_env("MOUSER_API_KEY")
 
-# Gemini model adı: Google zaman zaman model isimlerini değiştirip eskilerini
-# emekliye ayırıyor. Buraya yazacağınız ismi Google AI Studio / API
-# dokümantasyonundan güncel olarak teyit edin (genai.list_models() ile de
-# hesabınızın erişebildiği modelleri görebilirsiniz).
+
 GEMINI_MODEL_NAME = "gemini-3.6-flash"
 
 REQUIRED_COLUMNS = ["MPN", "Manufacturer", "Description", "Qty", "RefDes"]
 
-# ============================================================
 # GERÇEK KOMPONENT API FONKSİYONU (Mouser)
-# ============================================================
-@st.cache_data(show_spinner=False, ttl=60 * 60)  # 1 saat cache: aynı MPN'i tekrar tekrar sorgulamaz
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)  # 1 saat cache
 def gercek_api_ile_sorgula(mpn: str) -> tuple:
     """Tek bir MPN için Mouser API'sinden durum bilgisi çeker.
     Sonucu tuple döner (Streamlit cache'i pandas Series ile bazen sorun çıkarabildiği için)."""
@@ -62,9 +58,7 @@ def gercek_api_ile_sorgula(mpn: str) -> tuple:
     payload = {
         "SearchByPartRequest": {
             "mouserPartNumber": mpn,
-            # NOT: Mouser API dokümantasyonundaki örnekte bu alan "string" olarak
-            # görünür ama bu sadece bir yer tutucudur, gerçek bir değer DEĞİLDİR.
-            # Geçerli bir değer vermiyorsanız boş bırakın.
+            
             "partSearchOptions": "",
         }
     }
