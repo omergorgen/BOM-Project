@@ -275,8 +275,7 @@ if yuklenen_dosya is not None:
         )
         st.stop()
 
-    # dropna=False: MPN/Manufacturer/Description içinde boş hücre olan
-    # satırların sessizce silinmesini önler.
+    
     konsolide_df = (
         df.groupby(["MPN", "Manufacturer", "Description"], dropna=False)
         .agg({"Qty": "sum", "RefDes": lambda x: ", ".join(map(str, x))})
@@ -314,7 +313,7 @@ if yuklenen_dosya is not None:
             ["Durum", "En Ucuz Fiyat", "En Ucuz Tedarikçi", "Tedarikçi Sayısı", "Risk Skoru"]
         ] = konsolide_df["MPN"].apply(satir_zenginlestir)
 
-    # Risk skoruna göre görsel vurgulama
+    # risk skoruna göre görsel vurgulama
     def risk_renklendir(val):
         try:
             v = float(val)
@@ -327,7 +326,7 @@ if yuklenen_dosya is not None:
         return "background-color: #d4edda"
 
     try:
-        # Pandas >= 2.1: Styler.map, eski sürümlerde: Styler.applymap
+        
         stil = konsolide_df.style.map(risk_renklendir, subset=["Risk Skoru"])
     except AttributeError:
         stil = konsolide_df.style.applymap(risk_renklendir, subset=["Risk Skoru"])
@@ -338,9 +337,8 @@ if yuklenen_dosya is not None:
     if not yuksek_riskli.empty:
         st.error(f"{len(yuksek_riskli)} parça yüksek risk taşıyor (bulunamadı / stoksuz).")
 
-    # --------------------------------------------------------
-    # TEDARİKÇİ KARŞILAŞTIRMASI (tek bir parça için tüm alternatifler)
-    # --------------------------------------------------------
+    # TEDARİKÇİ KARŞILAŞTIRMASI 
+    
     st.markdown("---")
     st.subheader("Tedarikçi Karşılaştırması")
     st.write("Bir parça seçin, o parçanın tüm alternatif tedarikçilerdeki fiyatlarını görün.")
@@ -361,9 +359,9 @@ if yuklenen_dosya is not None:
             )
             st.dataframe(teklif_df, width='stretch')
 
-    # --------------------------------------------------------
+    
     # YAPAY ZEKA ASİSTANI (GEMINI)
-    # --------------------------------------------------------
+    
     st.markdown("---")
     st.subheader("Yapay Zeka BOM Asistanı")
     st.info("Bu asistan doğrudan BOM verinizi bağlam olarak okur ve mantıksal çıkarım yapar.")
