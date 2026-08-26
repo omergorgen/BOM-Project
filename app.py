@@ -1,4 +1,5 @@
-﻿import os
+﻿import io
+import os
 import concurrent.futures
 
 import streamlit as st
@@ -7,13 +8,21 @@ import requests
 import google.generativeai as genai
 
 
-# AYARLAR VE API ANAHTARLARI
 
+# Yerelde çalışırken .streamlit/secrets.toml dosyasına şunu ekleyin:
+#
+#   GEMINI_API_KEY = "..."
+#   NEXAR_CLIENT_ID = "..."
+#   NEXAR_CLIENT_SECRET = "..."
+#
+# Streamlit Cloud'da ise "Secrets" bölümünden aynı şekilde tanımlayın.
+# Ortam değişkeni olarak da verebilirsiniz (os.environ).
 st.set_page_config(page_title="BOM Analiz Aracı", layout="wide")
 
 
 def secret_veya_env(anahtar: str) -> str:
-   
+    """secrets.toml dosyası hiç yoksa st.secrets.get() bile hata fırlatabildiği
+    için (StreamlitSecretNotFoundError), bunu güvenli şekilde yakalıyoruz."""
     try:
         deger = st.secrets.get(anahtar)
         if deger:
@@ -27,7 +36,7 @@ GEMINI_API_KEY = secret_veya_env("GEMINI_API_KEY")
 NEXAR_CLIENT_ID = secret_veya_env("NEXAR_CLIENT_ID")
 NEXAR_CLIENT_SECRET = secret_veya_env("NEXAR_CLIENT_SECRET")
 
-#gemini model hatası veriyorsa buradan değiştir.
+
 GEMINI_MODEL_NAME = "gemini-3.6-flash"
 
 REQUIRED_COLUMNS = ["MPN", "Manufacturer", "Description", "Qty", "RefDes"]
@@ -37,33 +46,37 @@ REQUIRED_COLUMNS = ["MPN", "Manufacturer", "Description", "Qty", "RefDes"]
 NEXAR_TOKEN_URL = "https://identity.nexar.com/connect/token"
 NEXAR_GRAPHQL_URL = "https://api.nexar.com/graphql"
 
-NEXAR_SORGU = """
-query Search($mpn: String!) {
-  supSearchMpn(q: $mpn, limit: 1) {
-    results {
-      part {
-        mpn
-        shortDescription
-        manufacturer { name }
-        specs {
-          attribute { shortname name }
-          displayValue
-        }
-        sellers {
-          company { name }
-          offers {
-            sku
-            inventoryLevel
-            moq
-            prices { quantity price currency }
-            clickUrl
-          }
-        }
+NEXAR_OTURUM = requests.Session()
+
+# Bir parça sorgusunda istediğimiz alanlar (hem tekli hem toplu sorguda
+# kullanılan ortak GraphQL alan bloğu).
+NEXAR_PART_ALANLARI = """
+    mpn
+    shortDescription
+    manufacturer { name }
+    specs {
+      attribute { shortname name }
+      displayValue
+    }
+    similarParts {
+      name
+      mpn
+      octopartUrl
+    }
+    sellers {
+      company { name }
+      offers {
+        sku
+        inventoryLevel
+        moq
+        prices { quantity price currency }
+        clickUrl
       }
     }
-  }
-}
 """
+
+
+NEXAR_TOPLU_SORGU_BOYUTU = 15
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)  # token 30 dakika cache'lensin
@@ -72,13 +85,12 @@ def nexar_token_al() -> str:
     if not NEXAR_CLIENT_ID or not NEXAR_CLIENT_SECRET:
         return ""
     try:
-        resp = requests.post(
+        resp = NEXAR_OTURUM.post(
             NEXAR_TOKEN_URL,
             data={
                 "grant_type": "client_credentials",
                 "client_id": NEXAR_CLIENT_ID,
                 "client_secret": NEXAR_CLIENT_SECRET,
-                # "scope" parametresi kasıtlı olarak gönderilmiyor.gönderildiğinde hata veriyor.
                 
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -93,73 +105,30 @@ def nexar_token_al() -> str:
     return ""
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60)
-def nexar_parca_sorgula(mpn: str) -> dict:
-    """
-
-    Döndürdüğü sözlük:
-    {
-        "bulundu": bool,
-        "aciklama": str,
-        "uretici": str,
-        "teklifler": [(tedarikci, fiyat, para_birimi, adet_kirilimi, stok, link), ...]  # fiyata göre sıralı
-        "yasam_durumu_ham": str,       # Nexar'dan gelen orijinal metin, örn. "Obsolete (Last Updated: 3 months ago)"
-        "yasam_durumu_kategori": str,  # sadeleştirilmiş: "Aktif" / "NRND" / "EOL" / "Obsolete" / "Bilinmiyor"
-        "hata": str veya None
-    }
-    """
-    bos_sonuc = {
+def _bos_parca_sonucu(hata=None) -> dict:
+    """Her hata/başarısızlık durumunda aynı 8 alanlı şablonu döndürmek için
+    tek bir yerden üretiyoruz -- tutarlılık ve tekrar etmemek için."""
+    return {
         "bulundu": False, "aciklama": "-", "uretici": "-", "teklifler": [],
-        "yasam_durumu_ham": "-", "yasam_durumu_kategori": "Bilinmiyor", "hata": None,
+        "yasam_durumu_ham": "-", "yasam_durumu_kategori": "Bilinmiyor",
+        "alternatifler": [], "hata": hata,
     }
 
-    if not isinstance(mpn, str) or not mpn.strip():
-        return {**bos_sonuc, "hata": "Geçersiz MPN"}
 
-    token = nexar_token_al()
-    if not token:
-        return {**bos_sonuc, "hata": "Nexar anahtarı eksik/geçersiz"}
-
-    try:
-        resp = requests.post(
-            NEXAR_GRAPHQL_URL,
-            json={"query": NEXAR_SORGU, "variables": {"mpn": mpn}},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        )
-    except requests.exceptions.RequestException as e:
-        return {**bos_sonuc, "hata": f"Bağlantı hatası: {e}"}
-
-    if resp.status_code != 200:
-        return {**bos_sonuc, "hata": f"API hatası ({resp.status_code})"}
-
-    try:
-        data = resp.json()
-    except ValueError:
-        return {**bos_sonuc, "hata": "Geçersiz yanıt (JSON değil)"}
-
-    if data.get("errors"):
-        return {**bos_sonuc, "hata": str(data["errors"])[:200]}
-
-    sonuclar = data.get("data", {}).get("supSearchMpn", {}).get("results", []) or []
-    if not sonuclar:
-        return {**bos_sonuc, "hata": None}  # bulunamadı ama hata da yok
-
-    part = sonuclar[0].get("part", {}) or {}
+def _part_json_ayristir(part: dict) -> dict:
+    """Nexar'dan dönen ham 'part' JSON nesnesini bizim standart sözlük
+    yapımıza çevirir. Hem tekli hem toplu sorgu bu fonksiyonu kullanıyor,
+    böylece ayrıştırma mantığını iki yerde tekrar yazmıyoruz."""
     aciklama = part.get("shortDescription") or "-"
     uretici = (part.get("manufacturer") or {}).get("name", "-")
 
-    
+    # Yaşam döngüsü durumunu specs listesinden buluyoruz.
     yasam_durumu_ham = "-"
     for spec in part.get("specs", []) or []:
         attribute = spec.get("attribute") or {}
         if attribute.get("shortname") == "lifecyclestatus":
             yasam_durumu_ham = spec.get("displayValue") or "-"
             break
-
     yasam_durumu_kategori = yasam_durumu_kategorisi_belirle(yasam_durumu_ham)
 
     teklifler = []
@@ -178,8 +147,17 @@ def nexar_parca_sorgula(mpn: str) -> dict:
                 teklif.get("inventoryLevel", 0) or 0,
                 teklif.get("clickUrl", ""),
             ))
-
     teklifler.sort(key=lambda t: (t[1] is None, t[1]))  # en ucuzdan pahalıya
+
+   
+    # Nexar'ın "similarParts" alanı, aynı işlevi gören farklı MPN'leri döner.
+    alternatifler = []
+    for alt in part.get("similarParts", []) or []:
+        alternatifler.append({
+            "mpn": alt.get("mpn") or "-",
+            "isim": alt.get("name") or "-",
+            "link": alt.get("octopartUrl") or "",
+        })
 
     return {
         "bulundu": True,
@@ -188,12 +166,16 @@ def nexar_parca_sorgula(mpn: str) -> dict:
         "teklifler": teklifler,
         "yasam_durumu_ham": yasam_durumu_ham,
         "yasam_durumu_kategori": yasam_durumu_kategori,
+        "alternatifler": alternatifler,
         "hata": None,
     }
 
 
 def yasam_durumu_kategorisi_belirle(ham_metin: str) -> str:
- 
+    """Nexar'dan gelen serbest metin yaşam döngüsü ifadesini (üreticiden
+    üreticiye "Obsolete", "Discontinued", "NRND", "Not Recommended for New
+    Designs" gibi farklı ifadeler kullanılabiliyor) sabit birkaç kategoriye
+    indirger, böylece tabloda ve risk hesabında tutarlı şekilde kullanılabilir."""
     if not ham_metin or ham_metin == "-":
         return "Bilinmiyor"
 
@@ -211,46 +193,156 @@ def yasam_durumu_kategorisi_belirle(ham_metin: str) -> str:
 
 
 def uygun_en_ucuz_teklifi_bul(teklifler: list, gereken_miktar: int):
-   
+    """Teklif listesinden, TEK BAŞINA gereken miktarı karşılayabilecek
+    (stok >= gereken_miktar) tedarikçiler arasından en ucuzunu bulur.
+
+    Neden bu ayrım gerekli? "En ucuz teklif" listenin en başındaki teklif
+    olabilir, ama o tedarikçide sadece 10 adet stok varken bizim 2000 adete
+    ihtiyacımız olabilir. Böyle bir tedarikçiyi "en ucuz" diye önermek
+    yanıltıcı olur -- sipariş verilemez ya da parça parça birden fazla
+    siparişle tamamlanması gerekir. Bu fonksiyon, gerçekten TEK siparişte
+    ihtiyacı karşılayabilecek en uygun (ucuz + yeterli stoklu) seçeneği bulur.
+
+    Döner: (tedarikci, fiyat, para_birimi, stok) ya da hiçbiri yetmiyorsa None.
+    """
     uygun_teklifler = [t for t in teklifler if (t[4] or 0) >= gereken_miktar]
     if not uygun_teklifler:
         return None
-    # teklifler zaten fiyata göre sıralı geliyor, ama filtrelemeden sonra
-    # sıralamayı garantiye almak için tekrar sıralıyoruz.
     uygun_teklifler.sort(key=lambda t: (t[1] is None, t[1]))
     en_uygun = uygun_teklifler[0]
     return (en_uygun[0], en_uygun[1], en_uygun[2], en_uygun[4])
 
 
+def _nexar_toplu_istek_at(mpn_grubu: tuple) -> dict:
+    """HIZ İYİLEŞTİRMESİ #2'nin kalbi: Birden fazla MPN'i TEK BİR GraphQL
+    isteğinde sorgular. Bunu GraphQL'in 'alias' özelliğiyle yapıyoruz --
+    aynı sorgu içinde aynı alanı (supSearchMpn) farklı isimlerle (p0, p1, p2...)
+    birden çok kez, her seferinde farklı bir MPN değişkeniyle çağırabiliyoruz.
+
+    Örnek üretilen sorgu (3 parça için):
+        query TopluArama($mpn0: String!, $mpn1: String!, $mpn2: String!) {
+          p0: supSearchMpn(q: $mpn0, limit: 1) { results { part { ... } } }
+          p1: supSearchMpn(q: $mpn1, limit: 1) { results { part { ... } } }
+          p2: supSearchMpn(q: $mpn2, limit: 1) { results { part { ... } } }
+        }
+
+    Bu sayede 15 parça için 15 ayrı HTTP isteği yerine TEK istek atılıyor.
+    """
+    token = nexar_token_al()
+    if not token:
+        return {mpn: _bos_parca_sonucu("Nexar anahtarı eksik/geçersiz") for mpn in mpn_grubu}
+
+    degisken_tanimlari = ", ".join(f"$mpn{i}: String!" for i in range(len(mpn_grubu)))
+    alan_bloklari = "\n".join(
+        f'p{i}: supSearchMpn(q: $mpn{i}, limit: 1) {{ results {{ part {{ {NEXAR_PART_ALANLARI} }} }} }}'
+        for i in range(len(mpn_grubu))
+    )
+    sorgu = f"query TopluArama({degisken_tanimlari}) {{ {alan_bloklari} }}"
+    degiskenler = {f"mpn{i}": mpn for i, mpn in enumerate(mpn_grubu)}
+
+    try:
+        resp = NEXAR_OTURUM.post(
+            NEXAR_GRAPHQL_URL,
+            json={"query": sorgu, "variables": degiskenler},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+    except requests.exceptions.RequestException as e:
+        return {mpn: _bos_parca_sonucu(f"Bağlantı hatası: {e}") for mpn in mpn_grubu}
+
+    if resp.status_code != 200:
+        return {mpn: _bos_parca_sonucu(f"API hatası ({resp.status_code})") for mpn in mpn_grubu}
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return {mpn: _bos_parca_sonucu("Geçersiz yanıt (JSON değil)") for mpn in mpn_grubu}
+
+    veri = data.get("data") or {}
+    genel_hata = None
+    if data.get("errors") and not veri:
+        genel_hata = str(data["errors"])[:200]
+
+    sonuclar = {}
+    for i, mpn in enumerate(mpn_grubu):
+        if genel_hata:
+            sonuclar[mpn] = _bos_parca_sonucu(genel_hata)
+            continue
+        alan_adi = f"p{i}"
+        parca_sonuclari = (veri.get(alan_adi) or {}).get("results", []) or []
+        if not parca_sonuclari:
+            sonuclar[mpn] = _bos_parca_sonucu(None)  # bulunamadı ama hata değil
+            continue
+        part = parca_sonuclari[0].get("part", {}) or {}
+        sonuclar[mpn] = _part_json_ayristir(part)
+
+    return sonuclar
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)
+def _nexar_toplu_istek_at_cache(mpn_grubu: tuple) -> dict:
+    """_nexar_toplu_istek_at'in cache'lenmiş hali. Streamlit her etkileşimde
+    tüm scripti baştan çalıştırdığı için, aynı parça grubu tekrar istenirse
+    (örn. AI asistana soru sorulduğunda) 1 saat boyunca tekrar API'ye
+    gitmiyor, hafızadan dönüyor."""
+    return _nexar_toplu_istek_at(mpn_grubu)
+
+
 def toplu_nexar_sorgula(mpn_listesi, max_workers: int = 5) -> dict:
-    """Birden çok MPN için Nexar verilerini paralel çeker."""
+    """Birden çok MPN için Nexar verilerini, gruplar halinde VE paralel çeker.
+
+    İki katmanlı hız stratejisi:
+    1. Parçaları NEXAR_TOPLU_SORGU_BOYUTU'luk gruplara böl (örn. 50 parça -> 4 grup)
+    2. Bu grupları aynı anda (paralel) sorgula (ThreadPoolExecutor)
+
+    Böylece 50 parçalık bir BOM, tek tek 50 istek yerine yaklaşık 4 istekle,
+    üstelik bu 4 istek de birbirini beklemeden aynı anda atılarak sorgulanır.
+    """
     sonuclar = {}
     benzersiz_mpnler = list(dict.fromkeys(mpn_listesi))  # sırayı koruyarak tekilleştir
 
+    gruplar = [
+        tuple(benzersiz_mpnler[i:i + NEXAR_TOPLU_SORGU_BOYUTU])
+        for i in range(0, len(benzersiz_mpnler), NEXAR_TOPLU_SORGU_BOYUTU)
+    ]
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_mpn = {
-            executor.submit(nexar_parca_sorgula, mpn): mpn for mpn in benzersiz_mpnler
-        }
-        for future in concurrent.futures.as_completed(future_to_mpn):
-            mpn = future_to_mpn[future]
+        future_to_grup = {executor.submit(_nexar_toplu_istek_at_cache, grup): grup for grup in gruplar}
+        for future in concurrent.futures.as_completed(future_to_grup):
+            grup = future_to_grup[future]
             try:
-                sonuclar[mpn] = future.result()
+                sonuclar.update(future.result())
             except Exception as e:
                 import traceback
-                print(f"[Nexar Hatası] MPN={mpn}: {e}")
+                print(f"[Nexar Toplu Hata] grup={grup}: {e}")
                 traceback.print_exc()
-                sonuclar[mpn] = {
-                    "bulundu": False, "aciklama": "-", "uretici": "-",
-                    "teklifler": [], "yasam_durumu_ham": "-",
-                    "yasam_durumu_kategori": "Bilinmiyor",
-                    "hata": f"Beklenmeyen hata: {e}",
-                }
+                for mpn in grup:
+                    sonuclar[mpn] = _bos_parca_sonucu(f"Beklenmeyen hata: {e}")
 
     return sonuclar
 
 
 def risk_hesapla(nexar_sonucu: dict, gereken_miktar: int) -> tuple:
-    
+    """Üretim planına göre stok yeterliliğini VE yaşam döngüsü durumunu
+    birlikte değerlendiren risk skoru.
+
+    Mantık:
+    1. Nexar'daki tüm tedarikçilerin stoklarını toplayıp TOPLAM bulunabilir
+       stok miktarını çıkarıyoruz.
+    2. Bu toplamı, BOM'daki birim miktar × üretim adedi ile karşılaştırıyoruz.
+    3. Tek bir tedarikçiye bağımlı kalmak ayrı bir risk faktörü.
+    4. Parça Obsolete/EOL ise -- şu an stok görünse bile -- üretici artık
+       üretmiyor demektir; bu yüzden stok durumundan BAĞIMSIZ olarak yüksek
+       risk veriyoruz (mevcut stok tükenince yeniden temin imkânı yok).
+       NRND (yeni tasarımlar için önerilmiyor) parçalarda ise orta düzeyde
+       ek risk ekliyoruz; hâlâ üretiliyor ama üretici zaten "yeni tasarımda
+       kullanmayın" diyor.
+
+    Döndürür: (risk_skoru, toplam_stok, karsilama_orani_yuzde)
+    """
     if nexar_sonucu.get("hata"):
         return 50, 0, 0  # veri alınamadı, temkinli orta risk
 
@@ -259,45 +351,50 @@ def risk_hesapla(nexar_sonucu: dict, gereken_miktar: int) -> tuple:
 
     yasam_kategori = nexar_sonucu.get("yasam_durumu_kategori", "Bilinmiyor")
 
-   
     if yasam_kategori in ("Obsolete", "EOL"):
         teklifler = nexar_sonucu.get("teklifler", [])
         toplam_stok = sum((t[4] or 0) for t in teklifler) if teklifler else 0
         karsilama_orani = (toplam_stok / gereken_miktar * 100) if gereken_miktar > 0 else 0
-        return 95, toplam_stok, min(karsilama_orani, 100)
+        return 95, toplam_stok, min(karsilama_orani, 999)
 
     teklifler = nexar_sonucu.get("teklifler", [])
     if not teklifler:
         return 90, 0, 0  # kayıt var ama satılabilir teklif yok
 
-    
     toplam_stok = sum((t[4] or 0) for t in teklifler)
     stoklu_tedarikci_sayisi = sum(1 for t in teklifler if (t[4] or 0) > 0)
 
     karsilama_orani = (toplam_stok / gereken_miktar * 100) if gereken_miktar > 0 else 100
-    karsilama_orani = min(karsilama_orani, 100)  # aşırı büyük sayıları sınırla (görüntü için)
+    karsilama_orani = min(karsilama_orani, 999)
 
     if toplam_stok == 0:
-        return 95, toplam_stok, 0  # hiç stok yok -> çok yüksek risk
+        return 95, toplam_stok, 0
 
     if toplam_stok < gereken_miktar:
-        # Kısmen karşılıyor ama yetersiz -> ne kadar eksikse risk o kadar yüksek
         eksik_oran = 1 - (toplam_stok / gereken_miktar)
-        risk = int(60 + eksik_oran * 35)  # 60-95 arası kademeli
+        risk = int(60 + eksik_oran * 35)
         return risk, toplam_stok, karsilama_orani
 
-    # Stok yeterli, ama tek tedarikçiye bağımlıysak yine de bir miktar risk var
     if stoklu_tedarikci_sayisi == 1:
         risk = 35
     else:
-        risk = 10  # yeterli stok + birden fazla kaynak -> güvenli
+        risk = 10
 
-    
     if yasam_kategori == "NRND":
-        risk = min(risk + 20, 89)  
+        risk = min(risk + 20, 89)
 
     return risk, toplam_stok, karsilama_orani
 
+
+def excele_donustur(df: pd.DataFrame) -> bytes:
+    """REVİZYON 3: Verilen tabloyu, indirilebilir bir .xlsx dosyasının ham
+    baytlarına çevirir. Diske geçici dosya yazmak yerine bellek üzerinde
+    (io.BytesIO) çalışıyoruz -- Streamlit'in indirme butonu için daha
+    temiz ve dosya sistemi izinlerinden bağımsız bir yöntem."""
+    arabellek = io.BytesIO()
+    with pd.ExcelWriter(arabellek, engine="openpyxl") as yazici:
+        df.to_excel(yazici, index=False, sheet_name="BOM Analizi")
+    return arabellek.getvalue()
 
 
 # ARAYÜZ VE ANALİZ
@@ -340,7 +437,6 @@ if yuklenen_dosya is not None:
         )
         st.stop()
 
-    
     konsolide_df = (
         df.groupby(["MPN", "Manufacturer", "Description"], dropna=False)
         .agg({"Qty": "sum", "RefDes": lambda x: ", ".join(map(str, x))})
@@ -370,7 +466,7 @@ if yuklenen_dosya is not None:
             birim_qty = row["Qty"]
             gereken_miktar = int(birim_qty) * int(uretim_adedi)
 
-            sonuc = nexar_map.get(mpn, {"bulundu": False, "teklifler": [], "hata": "Sonuç yok"})
+            sonuc = nexar_map.get(mpn, _bos_parca_sonucu("Sonuç yok"))
             teklifler = sonuc.get("teklifler", [])
             risk, toplam_stok, karsilama_orani = risk_hesapla(sonuc, gereken_miktar)
 
@@ -381,7 +477,6 @@ if yuklenen_dosya is not None:
             else:
                 durum = "Bulundu"
 
-            
             uygun_teklif = uygun_en_ucuz_teklifi_bul(teklifler, gereken_miktar)
             if uygun_teklif:
                 uygun_tedarikci, uygun_fiyat, uygun_para_birimi, uygun_stok = uygun_teklif
@@ -397,12 +492,13 @@ if yuklenen_dosya is not None:
 
             karsilama_metni = f"%{karsilama_orani:.0f}" if teklifler else "-"
             yasam_durumu = sonuc.get("yasam_durumu_kategori", "Bilinmiyor")
+            alternatif_sayisi = len(sonuc.get("alternatifler", []))
 
             return pd.Series([
                 durum, yasam_durumu, len(teklifler),
                 gereken_miktar, toplam_stok, karsilama_metni,
                 uygun_tedarikci, uygun_fiyat_metni, uygun_toplam_maliyet,
-                risk,
+                alternatif_sayisi, risk,
             ])
 
         konsolide_df[
@@ -410,29 +506,29 @@ if yuklenen_dosya is not None:
                 "Durum", "Yaşam Döngüsü", "Tedarikçi Sayısı",
                 "Gereken Miktar", "Toplam Stok", "Stok Karşılama",
                 "Uygun En Ucuz Tedarikçi", "Birim Fiyat", "Toplam Maliyet",
-                "Risk Skoru",
+                "Alternatif Sayısı", "Risk Skoru",
             ]
         ] = konsolide_df.apply(satir_zenginlestir, axis=1)
 
-    # Risk skoruna göre görsel vurgulama
+    
     def risk_renklendir(val):
         try:
             v = float(val)
         except (TypeError, ValueError):
             return ""
         if v >= 70:
-            return "background-color: #ffcccc"
+            return "background-color: #ffcccc; color: black"
         if v >= 30:
-            return "background-color: #fff3cd"
-        return "background-color: #d4edda"
+            return "background-color: #fff3cd; color: black"
+        return "background-color: #d4edda; color: black"
 
     def yasam_durumu_renklendir(val):
         if val in ("Obsolete", "EOL"):
-            return "background-color: #ffcccc"
+            return "background-color: #ffcccc; color: black"
         if val == "NRND":
-            return "background-color: #fff3cd"
+            return "background-color: #fff3cd; color: black"
         if val == "Aktif":
-            return "background-color: #d4edda"
+            return "background-color: #d4edda; color: black"
         return ""
 
     def uygun_tedarikci_renklendir(val):
@@ -441,7 +537,6 @@ if yuklenen_dosya is not None:
         return ""
 
     try:
-        # Pandas >= 2.1: Styler.map, eski sürümlerde: Styler.applymap
         stil = konsolide_df.style.map(risk_renklendir, subset=["Risk Skoru"])
         stil = stil.map(yasam_durumu_renklendir, subset=["Yaşam Döngüsü"])
         stil = stil.map(uygun_tedarikci_renklendir, subset=["Uygun En Ucuz Tedarikçi"])
@@ -460,7 +555,6 @@ if yuklenen_dosya is not None:
             "'Gereken Miktar' ve 'Toplam Stok' sütunlarına bakın."
         )
 
-    
     def usd_maliyeti_ayikla(metin):
         if not isinstance(metin, str) or "USD" not in metin:
             return 0.0
@@ -483,14 +577,127 @@ if yuklenen_dosya is not None:
             "birden fazla tedarikçiden parça parça sipariş gerekebilir."
         )
 
+    # REVİZYON 3: Düzenlenmiş BOM'u Excel olarak indirme
+    
+    st.download_button(
+        label="Düzenlenmiş BOM'u Excel olarak indir",
+        data=excele_donustur(konsolide_df),
+        file_name="bom_analiz_sonucu.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    
+    # REVİZYON 1: HER PARÇA İÇİN ALTERNATİFLER
+    
+    st.markdown("---")
+    st.subheader("Parça Alternatifleri")
+    st.write(
+        "Nexar'ın veritabanına göre, seçtiğiniz parçayla aynı işlevi görebilecek "
+        "benzer spesifikasyonlu alternatif parçalar."
+    )
+
+    alternatif_icin_mpn = st.selectbox(
+        "Alternatiflerini görmek istediğiniz parçayı seçin:",
+        konsolide_df["MPN"].tolist(),
+        key="alternatif_secimi",
+    )
+
+    if alternatif_icin_mpn:
+        secili_sonuc = nexar_map.get(alternatif_icin_mpn, {})
+        alternatifler = secili_sonuc.get("alternatifler", [])
+        secili_satir = konsolide_df[konsolide_df["MPN"] == alternatif_icin_mpn].iloc[0]
+
+        st.caption(
+            f"Seçili parça: **{alternatif_icin_mpn}** — {secili_satir['Description']} "
+            f"| Fiyat: {secili_satir['Birim Fiyat']} | Yaşam Döngüsü: {secili_satir['Yaşam Döngüsü']}"
+        )
+
+        if not alternatifler:
+            st.info(
+                "Bu parça için Nexar veritabanında kayıtlı bir alternatif bulunamadı. "
+                "(Not: Alternatif verisi her parça için mevcut olmayabilir.)"
+            )
+        else:
+            alternatif_df = pd.DataFrame(alternatifler)
+            alternatif_df.columns = ["Alternatif MPN", "Ürün Adı", "Octopart Linki"]
+            st.dataframe(alternatif_df, width='stretch')
+            st.caption(
+                "Not: Bu alternatiflerin kendi fiyat/stok bilgisini görmek isterseniz, "
+                "MPN'lerini kopyalayıp yeni bir BOM satırı olarak ayrıca sorgulayabilirsiniz."
+            )
+
+   
+    # REVİZYON 2: AYNI İŞLEVİ GÖREN FARKLI MARKA PARÇALARI BİRLEŞTİRME ÖNERİSİ
+   
+    st.markdown("---")
+    st.subheader("Konsolidasyon Önerileri (Aynı İşlevi Gören Farklı Marka Parçaları)")
+    st.write(
+        "BOM'unuzda, açıklaması (Description) aynı olan ama farklı üretici/MPN'e "
+        "sahip parça çiftleri, muhtemelen aynı işlevi görüyor ama farklı "
+        "tedarikçilerden alınıyor. Bu parçaları TEK bir markada birleştirerek "
+        "hem sipariş karmaşıklığını azaltabilir hem de -- fiyat/stok/yaşam "
+        "döngüsü karşılaştırmasına göre -- daha güvenli/ucuz bir seçenek "
+        "bulabilirsiniz."
+    )
+
+    konsolide_df["_normalize_aciklama"] = (
+        konsolide_df["Description"].astype(str).str.strip().str.lower()
+    )
+    grup_sayaclari = konsolide_df.groupby("_normalize_aciklama")["MPN"].transform("nunique")
+    konsolidasyon_adaylari = konsolide_df[grup_sayaclari > 1]
+
+    if konsolidasyon_adaylari.empty:
+        st.info(
+            "Şu an BOM'unuzda, aynı açıklamaya sahip ama farklı MPN'li bir parça "
+            "çifti bulunamadı -- konsolidasyon önerecek bir durum yok."
+        )
+    else:
+        for aciklama_key, grup in konsolidasyon_adaylari.groupby("_normalize_aciklama"):
+            with st.expander(f"'{grup.iloc[0]['Description']}' için {len(grup)} farklı seçenek bulundu"):
+                karsilastirma_df = grup[
+                    [
+                        "MPN", "Manufacturer", "Birim Fiyat", "Toplam Stok",
+                        "Yaşam Döngüsü", "Risk Skoru",
+                    ]
+                ].copy()
+                st.dataframe(karsilastirma_df, width='stretch')
+
+             
+                def _fiyat_sayiya_cevir(deger):
+                    try:
+                        return float(str(deger).split()[0])
+                    except (ValueError, IndexError):
+                        return float("inf")
+
+                grup_siralanmis = grup.copy()
+                grup_siralanmis["_fiyat_sayi"] = grup_siralanmis["Birim Fiyat"].apply(_fiyat_sayiya_cevir)
+                grup_siralanmis = grup_siralanmis.sort_values(by=["Risk Skoru", "_fiyat_sayi"])
+                onerilen = grup_siralanmis.iloc[0]
+                digerleri = grup_siralanmis.iloc[1:]
+
+                toplam_birlesik_miktar = int(grup["Qty"].sum())
+                st.success(
+                    f"**Öneri:** Bu {len(grup)} parçayı **{onerilen['MPN']}** "
+                    f"({onerilen['Manufacturer']}) üzerinde birleştirin. "
+                    f"Gerekçe: Risk Skoru {onerilen['Risk Skoru']} (en düşük), "
+                    f"Fiyat {onerilen['Birim Fiyat']}, Yaşam Döngüsü: {onerilen['Yaşam Döngüsü']}. "
+                    f"Birleştirilirse tek bir MPN için toplam {toplam_birlesik_miktar} adetlik "
+                    "tek bir sipariş kalemi oluşur."
+                )
+                if not digerleri.empty:
+                    vazgecilen_mpnler = ", ".join(digerleri["MPN"].tolist())
+                    st.caption(f"Yerine geçecek parçalar: {vazgecilen_mpnler}")
+
+    konsolide_df = konsolide_df.drop(columns=["_normalize_aciklama"])
+
     
     # TEDARİKÇİ KARŞILAŞTIRMASI (tek bir parça için tüm alternatifler)
-    
+   
     st.markdown("---")
     st.subheader("Tedarikçi Karşılaştırması")
     st.write("Bir parça seçin, o parçanın tüm alternatif tedarikçilerdeki fiyatlarını görün.")
 
-    secilen_mpn = st.selectbox("Parça (MPN) seçin:", konsolide_df["MPN"].tolist())
+    secilen_mpn = st.selectbox("Parça (MPN) seçin:", konsolide_df["MPN"].tolist(), key="tedarikci_secimi")
 
     if secilen_mpn:
         sonuc = nexar_map.get(secilen_mpn, {})
@@ -518,7 +725,7 @@ if yuklenen_dosya is not None:
             )
             st.dataframe(teklif_df, width='stretch')
 
-  
+    
     # YAPAY ZEKA ASİSTANI (GEMINI)
     
     st.markdown("---")
