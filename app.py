@@ -1,5 +1,9 @@
-import io
+import sys
 import os
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+import io
 import re
 import json
 import csv
@@ -13,8 +17,31 @@ import streamlit as st
 import pandas as pd
 import requests
 import altair as alt
-import google.generativeai as genai
-import decision_engine as de
+
+# ============================================================
+# DIŞ MODÜL KONTROLLERİ (Hata yakalama ve Optimizasyon)
+# ============================================================
+
+# 1. Gemini Yeni SDK Desteği (Terminaldeki uyarıyı çözer)
+try:
+    from google import genai
+    YENI_GENAI_KULLAN = True
+except ImportError:
+    import google.generativeai as genai
+    YENI_GENAI_KULLAN = False
+
+# 2. Karar Motoru (Decision Engine) Modül Kontrolü
+try:
+    import decision_engine as de
+except ModuleNotFoundError as e:
+    st.set_page_config(page_title="Modül Hatası", layout="centered")
+    st.error(f"🚨 `decision_engine.py` dosyası veya içindeki bir modül bulunamadı! Hata: {e}")
+    st.warning(
+        "Lütfen `decision_engine.py` dosyasını `app.py` ile **AYNI KLASÖRE** kaydettiğinizden emin olun.\n\n"
+        f"Uygulamanın şu an baktığı klasör: `{os.getcwd()}`"
+    )
+    st.stop()
+
 
 # ============================================================
 # YAPILANDIRMA & ARAYÜZ AYARLARI
@@ -50,9 +77,7 @@ def secret_veya_env(anahtar: str) -> str:
 
 # API Anahtarları
 GEMINI_API_KEY = secret_veya_env("GEMINI_API_KEY")
-# DÜZELTME: "gemini-3.6-flash" var olmayan/doğrulanmamış bir model adıydı, çalışma zamanı hatası üretiyordu.
-# Not: Bu ad, Google AI Studio / API hesabınızda gerçekten mevcut olan modellerle teyit edilmelidir.
-GEMINI_MODEL_NAME = "gemini-2.0-flash"
+GEMINI_MODEL_NAME = "gemini-3.6-flash"
 
 REQUIRED_COLUMNS = ["MPN", "Manufacturer", "Description", "Qty", "RefDes"]
 
@@ -81,7 +106,7 @@ if "denetim_kayitlari" not in st.session_state:
 # Karar motoru aday hesaplarını oturum içinde tekrar tekrar üretmemek için (performans) bellek-içi önbellek
 if "_karar_aday_onbellegi" not in st.session_state:
     st.session_state["_karar_aday_onbellegi"] = {}
-# AI yanıtlarını KULLANICIYA ÖZEL (session-scoped) önbellekle — global cache kullanılmaz (cache-poisoning riski)
+# AI yanıtlarını KULLANICIYA ÖZEL (session-scoped) önbellekle
 if "_ai_yanit_onbellegi" not in st.session_state:
     st.session_state["_ai_yanit_onbellegi"] = {}
 
@@ -95,11 +120,9 @@ EKOM_CACHE_TTL_SANIYE = 24 * 3600  # 24 saat sonra veri "bayat" sayılır, ama k
 
 
 # ============================================================
-# YARDIMCI: SAYI / METİN AYRIŞTIRMA (tek, paylaşılan, sağlam sürüm)
+# YARDIMCI: SAYI / METİN AYRIŞTIRMA 
 # ============================================================
 def _fiyat_parse(fiyat_metni):
-    """Fiyat metninden ('12.5 USD', '1.234,56', '-' vb.) güvenli şekilde float çıkarır.
-    Eski sürümdeki str(x).split(' ')[0] yaklaşımı farklı formatlarda sessizce veri kaybediyordu."""
     if fiyat_metni is None or fiyat_metni == "-":
         return None
     try:
@@ -118,7 +141,6 @@ def _fiyat_parse(fiyat_metni):
         else:
             sayi_str = sayi_str.replace(".", "").replace(",", ".")
     elif "," in sayi_str:
-        # Tek ayraç virgülse ondalık kabul et (TR formatı)
         sayi_str = sayi_str.replace(",", ".")
     try:
         return float(sayi_str)
@@ -134,7 +156,6 @@ def _yuzde_parse(deger) -> float:
 
 
 def _hucre_stili(val):
-    """Risk skoru renklendirmesi — tek, paylaşılan sürüm (eskiden tab1 ve tab5'te iki kez tanımlıydı)."""
     try:
         v = float(val)
     except Exception:
@@ -163,7 +184,7 @@ def _tedarikci_stili(val):
 
 
 # ============================================================
-# GEÇMİŞ VERİ (TARİHSEL TREND) — rotasyonlu, sınırsız büyümeyi önler
+# GEÇMİŞ VERİ (TARİHSEL TREND)
 # ============================================================
 def _gecmis_veriyi_oku() -> pd.DataFrame:
     if not os.path.exists(GECMIS_VERI_YOLU):
@@ -177,12 +198,11 @@ def _gecmis_veriyi_oku() -> pd.DataFrame:
 
 
 def _gecmis_veri_rotasyon_kontrol():
-    """Dosya çok büyüdüyse (satır sayısı sınırı aşıyorsa) eskiyi arşive taşıyıp sıfırdan başlar."""
     try:
         if not os.path.exists(GECMIS_VERI_YOLU):
             return
         with open(GECMIS_VERI_YOLU, "r", encoding="utf-8") as f:
-            satir_sayisi = sum(1 for _ in f) - 1  # başlık hariç
+            satir_sayisi = sum(1 for _ in f) - 1 
         if satir_sayisi > GECMIS_VERI_MAX_SATIR:
             arsiv_adi = GECMIS_VERI_YOLU.replace(".csv", f"_arsiv_{int(time.time())}.csv")
             os.rename(GECMIS_VERI_YOLU, arsiv_adi)
@@ -203,7 +223,6 @@ def _gecmis_veriyi_kaydet(yeni_satirlar: list):
 
 
 def _override_denetim_kaydet(eski_df: "pd.DataFrame", yeni_df: "pd.DataFrame"):
-    """İki override tablosu arasındaki farkları denetim izine (audit trail) yazar."""
     def _esit_mi(a, b):
         try:
             if pd.isna(a) and pd.isna(b):
@@ -247,8 +266,6 @@ _AGIRLIK_SIRA = ["maliyet", "risk", "tedarik", "teslim"]
 
 
 def _agirlik_degisti(degisen: str):
-    """Bir slider değiştiğinde diğer üçünü ORANTILI olarak yeniden dağıtır.
-    DÜZELTME: negatif ağırlık oluşmasına karşı tüm dallarda clamp (max(...,0.0)) eklendi."""
     mevcut = st.session_state.agirlik_degerleri
     yeni_deger = float(st.session_state[f"slider_{degisen}"])
     yeni_deger = min(max(yeni_deger, 0.0), 100.0)
@@ -277,7 +294,7 @@ def _agirlik_degisti(degisen: str):
 
 
 # ============================================================
-# KALICI YEREL ÖNBELLEK (SQLite) — API Maliyet ve Hız Optimizasyonu
+# KALICI YEREL ÖNBELLEK (SQLite)
 # ============================================================
 EKOM_API_URL = "https://developer-ekom.azurewebsites.net/api/v1/products/KeywordSearch"
 EKOM_OTURUM = requests.Session()
@@ -308,7 +325,7 @@ def _cache_dan_oku(mpn: str, ttl_saniye: int = EKOM_CACHE_TTL_SANIYE):
             return None
         veri_json, cekilme_zamani = satir
         if ttl_saniye is not None and (time.time() - cekilme_zamani) > ttl_saniye:
-            return None  # süresi dolmuş → API'den tazelenecek
+            return None 
         return json.loads(veri_json)
     except Exception as e:
         print(f"[Kalıcı Cache Okuma Hatası] MPN: {mpn}, Hata: {e}")
@@ -362,7 +379,6 @@ def _bos_parca_sonucu(hata=None) -> dict:
 
 
 def _ekom_json_ayristir(data: dict) -> dict:
-    """Ekom API'den (DigiKey tabanlı) dönen yanıtı standartlaştırır."""
     urunler = data.get("Products") or data.get("Results") or data.get("products") or []
     if not urunler and isinstance(data, list):
         urunler = data
@@ -416,9 +432,6 @@ def _ekom_json_ayristir(data: dict) -> dict:
 
 
 def ekom_istek_at(mpn: str, max_deneme: int = 3) -> dict:
-    """Tek bir MPN için Ekom API'ye POST isteği atar.
-    DÜZELTME: 429/timeout/bağlantı hatalarında üstel geri çekilme (exponential backoff + jitter) ile
-    yeniden dener; rate-limit'e art arda çarpmayı önler."""
     payload = {"keywords": mpn, "limit": 5, "offset": 0}
     son_hata = None
     for deneme in range(1, max_deneme + 1):
@@ -465,8 +478,6 @@ def ekom_istek_at(mpn: str, max_deneme: int = 3) -> dict:
 
 
 def ekom_veri_getir(mpn: str, zorla_yenile: bool = False) -> dict:
-    """YENİ (API Maliyet/Hız Optimizasyonu): Önce kalıcı SQLite önbelleğine bakar.
-    Veri varsa ve süresi dolmadıysa API'ye HİÇ istek atılmaz — oturum kapansa bile geçerlidir."""
     if not zorla_yenile:
         onbellek = _cache_dan_oku(mpn)
         if onbellek is not None:
@@ -479,8 +490,6 @@ def ekom_veri_getir(mpn: str, zorla_yenile: bool = False) -> dict:
 
 @st.cache_data(show_spinner=False, ttl=300)
 def _ekom_veri_getir_oturum_katmani(mpn: str, zorla_yenile: bool = False) -> dict:
-    """Aynı Streamlit rerun döngüsü içindeki tekrar çağrıları için kısa süreli bellek-içi katman.
-    Asıl kalıcılık SQLite katmanında (ekom_veri_getir) sağlanır."""
     return ekom_veri_getir(mpn, zorla_yenile=zorla_yenile)
 
 
@@ -488,7 +497,6 @@ def toplu_ekom_sorgula(mpn_listesi: list, zorla_yenile: bool = False, max_worker
     sonuclar = {}
     benzersiz_mpnler = list(dict.fromkeys(mpn_listesi))
 
-    # Kalıcı önbellekte olanları ÖNCE ayıkla — bunlar için thread/worker harcanmaz
     sorgulanacaklar = []
     for mpn in benzersiz_mpnler:
         if not zorla_yenile:
@@ -528,10 +536,7 @@ def yasam_durumu_kategorisi_belirle(ham_metin: str) -> str:
 
 
 # ============================================================
-# ÖVERRİDE'I TEK NOKTADAN UYGULAYAN METRİK HESABI
-# (DÜZELTME: eskiden override sadece konsolide_df'e uygulanıyordu, ekom_map/detay ekranları
-#  ve karar motoru orijinal veriyi kullanmaya devam ediyordu → tutarsızlık. Artık override
-#  parca_metriklerini_hesapla() içine gömülü; TÜM ekranlar bu tek fonksiyonu çağırıyor.)
+# OVERRIDE METRİK HESABI
 # ============================================================
 def override_al(mpn: str, override_df: "pd.DataFrame") -> dict:
     if override_df is None or override_df.empty:
@@ -539,7 +544,7 @@ def override_al(mpn: str, override_df: "pd.DataFrame") -> dict:
     eslesen = override_df[override_df["MPN"].astype(str).str.strip() == str(mpn).strip()]
     if eslesen.empty:
         return {}
-    satir = eslesen.iloc[-1]  # aynı MPN birden fazla girildiyse en sonuncusu geçerli olsun
+    satir = eslesen.iloc[-1] 
     return {
         "risk": float(satir["Override Risk Skoru"]) if pd.notna(satir.get("Override Risk Skoru")) else None,
         "fiyat_usd": float(satir["Override Birim Fiyat (USD)"]) if pd.notna(satir.get("Override Birim Fiyat (USD)")) else None,
@@ -548,7 +553,6 @@ def override_al(mpn: str, override_df: "pd.DataFrame") -> dict:
 
 
 def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int, override: dict = None) -> dict:
-    """Risk, stok, fiyat metriklerini hesaplar; varsa manuel override'ları TEK NOKTADAN uygular."""
     override = override or {}
 
     if sonuc.get("hata"):
@@ -602,7 +606,6 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int, override: dict 
             "risk_bilesenleri": bilesenler,
         }
 
-    # --- Manuel override'ları tek noktada, tüm çağıranlar için tutarlı şekilde uygula ---
     if override.get("stok") is not None:
         temel["toplam_stok"] = override["stok"]
         temel["karsilama"] = min((override["stok"] / gereken_miktar * 100) if gereken_miktar > 0 else 0, 999)
@@ -629,16 +632,24 @@ def excele_donustur(df: pd.DataFrame) -> bytes:
 
 
 def ai_yanit_getir(prompt: str, api_key: str, model_name: str) -> str:
-    """DÜZELTME: Global st.cache_data yerine OTURUMA ÖZEL (st.session_state) önbellek kullanılıyor.
-    Paylaşımlı bir sunucuda farklı kullanıcıların prompt/yanıtlarının çapraz sızmasını (cache-poisoning
-    riskini) engeller; yine de aynı oturumda tekrarlanan sorular için API çağrısı tasarrufu sağlar."""
+    """YENİ: Hem yeni google.genai SDK'sını destekler hem de eski kütüphane için fallback içerir."""
     onbellek = st.session_state["_ai_yanit_onbellegi"]
     anahtar = hashlib.sha256(f"{model_name}|{prompt}".encode("utf-8")).hexdigest()
     if anahtar in onbellek:
         return onbellek[anahtar]
-    genai.configure(api_key=api_key)
-    llm = genai.GenerativeModel(model_name)
-    yanit = llm.generate_content(prompt).text
+    
+    if YENI_GENAI_KULLAN:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+        )
+        yanit = response.text
+    else:
+        genai.configure(api_key=api_key)
+        llm = genai.GenerativeModel(model_name)
+        yanit = llm.generate_content(prompt).text
+        
     onbellek[anahtar] = yanit
     return yanit
 
@@ -768,11 +779,8 @@ if yuklenen_dosya:
             sutunlar = ["Durum", "Yaşam Döngüsü", "Tedarikçi Sayısı", "İhtiyaç", "Küresel Stok", "Karşılama Oranı",
                         "En Uygun Tedarikçi", "Birim Fiyat", "Toplam Maliyet", "Alternatif", "Risk Skoru"]
             konsolide_df[sutunlar] = konsolide_df.apply(satir_isleyici, axis=1)
-            # NOT: Override artık parca_metriklerini_hesapla() içinde tek noktadan uygulandığı için
-            # (DÜZELTME) burada ayrıca konsolide_df üzerinde ikinci bir override-ezme döngüsüne GEREK YOK.
-            # Bu sayede tab2, tab6 ve karar motoru da AYNI override'lı veriyi görür (tutarlılık sağlandı).
 
-        # Geçmiş Veri Kaydı — her BOM+adet kombinasyonu için TEK sefer loglanır
+        # Geçmiş Veri Kaydı
         _log_imzasi = hashlib.md5(
             f"{yuklenen_dosya.name}|{uretim_adedi}|{len(konsolide_df)}|{sorted(konsolide_df['MPN'].astype(str).tolist())}".encode("utf-8")
         ).hexdigest()
@@ -789,7 +797,7 @@ if yuklenen_dosya:
                 _gecmis_veriyi_kaydet(_yeni_log_satirlari)
                 st.session_state["_son_log_imzasi"] = _log_imzasi
             except Exception:
-                pass  # Yerel disk yazılamıyorsa (ör. bazı bulut ortamları) sessizce geç
+                pass 
 
         # Dashboard
         toplam_usd = konsolide_df["Toplam Maliyet"].apply(
@@ -962,8 +970,6 @@ with tab5:
 # SEKME 6: KARAR DESTEK SİSTEMİ
 # ============================================================
 def _konsolidasyon_bonus_uygula(aday: dict, tercih_tedarikci: str, bonus: float) -> dict:
-    """DÜZELTME: substring yerine KELİME SINIRI (\\b) ile eşleşme aranıyor; kısa/genel tedarikçi
-    isimlerinde (örn. 'A') başka bir adayın adını yanlışlıkla eşleştirme riski azaltıldı."""
     if tercih_tedarikci and tercih_tedarikci != "Yok" and str(tercih_tedarikci).strip():
         desen = r"\b" + re.escape(str(tercih_tedarikci).strip().lower()) + r"\b"
         if re.search(desen, str(aday["Aday"]).lower()):
@@ -1056,9 +1062,6 @@ def _parca_adaylarini_olustur(row, ekom_map: dict, agirlik: "de.Agirliklar", max
 
 
 def _karar_onbellek_anahtari(mpn, agirlik, esik_fark, manuel_df, kur_tablosu, override_df):
-    """PERFORMANS DÜZELTMESİ: aynı MPN için (ağırlıklar/eşik/manuel teklif/override/kur değişmediği
-    sürece) aday listesi tekrar hesaplanmaz; her widget etkileşiminde tüm BOM'un yeniden hesaplanması
-    (O(n) rerun) engellenir."""
     if manuel_df is not None and not manuel_df.empty:
         ilgili_manuel = manuel_df[manuel_df["MPN"].astype(str).str.strip() == str(mpn).strip()]
         manuel_hash = hashlib.md5(ilgili_manuel.to_csv(index=False).encode("utf-8")).hexdigest()
@@ -1157,7 +1160,7 @@ with tab6:
             "🗂️ Senaryolar", "📄 Denetim, Proje & Rapor"
         ])
 
-        # --- 6.0 MANUEL VERİ DÜZELTME (API override) -----
+        # --- 6.0 MANUEL VERİ DÜZELTME -----
         with alt_sekme0:
             st.markdown(
                 "Ekom API'den gelen **Risk Skoru**, **Birim Fiyat** veya **Küresel Stok** yanlış/eksikse, "
@@ -1177,12 +1180,12 @@ with tab6:
             _override_denetim_kaydet(st.session_state.get("_onceki_override_df"), duzenlenmis_override)
             st.session_state["_onceki_override_df"] = duzenlenmis_override.copy()
             if not st.session_state.manuel_override.equals(duzenlenmis_override):
-                st.session_state["_karar_aday_onbellegi"] = {}  # override değiştiyse karar önbelleğini geçersiz kıl
+                st.session_state["_karar_aday_onbellegi"] = {} 
             st.session_state.manuel_override = duzenlenmis_override
             if not duzenlenmis_override.dropna(subset=["MPN"]).empty:
                 st.caption("✅ Düzeltmeler kaydedildi; ana tablo, detay ekranları ve karar motoru artık AYNI (tutarlı) veriyi kullanıyor.")
 
-        # --- 6.1 TEDARİKÇİ / PARÇA SEÇİMİ + ALTERNATİF KARŞILAŞTIRMA -----
+        # --- 6.1 TEDARİKÇİ / PARÇA SEÇİMİ -----
         with alt_sekme1:
             st.caption(
                 f"Ağırlıklar → 💰 Maliyet: %{KARAR_AGIRLIKLARI.maliyet*100:.0f}  "
@@ -1240,7 +1243,6 @@ with tab6:
                 "Detayını görmek istediğiniz parçayı seçin:", konsolide_df["MPN"].tolist(), key="karar_secim"
             )
             secili_row = konsolide_df[konsolide_df["MPN"] == secilen_mpn6].iloc[0]
-            # PERFORMANS DÜZELTMESİ: yukarıdaki döngüde zaten hesaplanmış sonucu yeniden kullan (tekrar hesaplama yok)
             detay_sonuc = _karar_sonuc_haritasi.get(secilen_mpn6) or de.parca_karar_onerisi(
                 _karar_adaylarini_getir(secili_row, ekom_map, KARAR_AGIRLIKLARI, ESIK_FARK,
                                         gecerli_manuel_ana, st.session_state.kur_tablosu, st.session_state.manuel_override),
@@ -1451,7 +1453,7 @@ with tab6:
                         key="manuel_export_btn"
                     )
 
-        # --- 6.5 TEDARİKÇİ KONSOLİDASYONU (parçalar arası bağlantı) -----
+        # --- 6.5 TEDARİKÇİ KONSOLİDASYONU -----
         with alt_sekme5:
             st.markdown(
                 "Her parçayı tek başına en iyi tedarikçiye göre seçmek yerine, **birden fazla parçayı aynı "
@@ -1541,7 +1543,7 @@ with tab6:
                     st.session_state.konsolidasyon_bonus = 0.0
                     st.caption("Şu an hiçbir tedarikçiye bonus uygulanmıyor; her parça tamamen bağımsız değerlendiriliyor.")
 
-        # --- 6.6 SENARYOLAR (Çoklu Ağırlık Kıyaslaması) -----
+        # --- 6.6 SENARYOLAR -----
         with alt_sekme6:
             st.markdown(
                 "Farklı ağırlık kombinasyonlarını (örn. **'Maliyet Öncelikli'** / **'Teslimat Öncelikli'**) "
@@ -1694,7 +1696,6 @@ with tab6:
                     })
                 _rapor_oneri_df = pd.DataFrame(_rapor_oneri_satirlari)
 
-                # GÜVENLİK DÜZELTMESİ (XSS): tüm hücreler HTML'e gömülmeden önce escape edilir.
                 _rapor_satir_html = "".join(
                     "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
                         html_lib.escape(str(r['MPN'])),
