@@ -1,15 +1,17 @@
 import io
 import os
 import concurrent.futures
+
 import streamlit as st
 import pandas as pd
 import requests
 import google.generativeai as genai
+
 # ============================================================
 # YAPILANDIRMA & ARAYÜZ AYARLARI
 # ============================================================
 st.set_page_config(
-    page_title="CircuitBOM | BOM Intelligence",
+    page_title="circuitebom",
     page_icon="bom_analiz_simge.ico",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -33,20 +35,21 @@ def secret_veya_env(anahtar: str) -> str:
     except Exception: pass
     return os.environ.get(anahtar, "")
 
-# API Anahtarları
+# GÜVENLİ API ANAHTARLARI
 GEMINI_API_KEY = secret_veya_env("GEMINI_API_KEY")
-# Geliştirme 1: Model adı istendiği gibi güncellendi
+EKOM_API_KEY = secret_veya_env("EKOM_API_KEY") # Yeni eklenen Ekom Anahtarı
+
 GEMINI_MODEL_NAME = "gemini-3.6-flash" 
 
 REQUIRED_COLUMNS = ["MPN", "Manufacturer", "Description", "Qty", "RefDes"]
 
-# Ekom Trial API Endpoint'i (Görselden alınmıştır)
+# Ekom Trial API Endpoint'i
 EKOM_API_URL = "https://developer-ekom.azurewebsites.net/api/v1/products/KeywordSearch"
 EKOM_OTURUM = requests.Session()
 TOPLU_SORGU_WORKER_SAYISI = 5
 
 # ============================================================
-# EKOM API İŞLEMLERİ (YENİ)
+# EKOM API İŞLEMLERİ 
 # ============================================================
 def _bos_parca_sonucu(hata=None) -> dict:
     return {
@@ -56,8 +59,6 @@ def _bos_parca_sonucu(hata=None) -> dict:
     }
 
 def _ekom_json_ayristir(data: dict) -> dict:
-    """Ekom API'den (DigiKey tabanlı) dönen yanıtı standartlaştırır."""
-    # API'nin yanıt şemasına göre esnek veri çekme (Products, Results vb. anahtarları dener)
     urunler = data.get("Products") or data.get("Results") or data.get("products") or []
     if not urunler and isinstance(data, list):
         urunler = data
@@ -67,16 +68,13 @@ def _ekom_json_ayristir(data: dict) -> dict:
 
     ilk_urun = urunler[0]
     
-    # Temel Bilgiler
     aciklama = ilk_urun.get("ProductDescription") or ilk_urun.get("Description") or "-"
     uretici = (ilk_urun.get("Manufacturer") or {}).get("Name") or ilk_urun.get("ManufacturerName") or "-"
     
-    # Yaşam Döngüsü (Product Status)
     statu_obj = ilk_urun.get("ProductStatus") or ilk_urun.get("Status") or "Bilinmiyor"
     yasam_durumu_ham = statu_obj.get("Status") if isinstance(statu_obj, dict) else statu_obj
     yasam_kategori = yasam_durumu_kategorisi_belirle(str(yasam_durumu_ham))
 
-    # Fiyat ve Stok
     toplam_stok = ilk_urun.get("QuantityAvailable") or 0
     teklifler = []
     fiyat_listesi = ilk_urun.get("StandardPricing") or ilk_urun.get("Pricing") or []
@@ -85,13 +83,12 @@ def _ekom_json_ayristir(data: dict) -> dict:
         for f in fiyat_listesi:
             qty = f.get("Quantity") or f.get("Break") or 1
             price = f.get("UnitPrice") or f.get("Price") or 0.0
-            teklifler.append(("Ekom/DigiKey", price, "USD", qty, toplam_stok, "-"))
+            teklifler.append(("Ekom", price, "USD", qty, toplam_stok, "-"))
     elif ilk_urun.get("UnitPrice"):
-        teklifler.append(("Ekom/DigiKey", ilk_urun.get("UnitPrice"), "USD", 1, toplam_stok, "-"))
+        teklifler.append(("Ekom", ilk_urun.get("UnitPrice"), "USD", 1, toplam_stok, "-"))
     
     teklifler.sort(key=lambda t: (t[1] is None, t[1]))
 
-    # Alternatifler
     alternatifler_ham = ilk_urun.get("Alternates") or ilk_urun.get("SimilarParts") or []
     alternatifler = []
     for alt in alternatifler_ham:
@@ -114,23 +111,30 @@ def _ekom_json_ayristir(data: dict) -> dict:
     }
 
 def ekom_istek_at(mpn: str) -> dict:
-    """Tek bir MPN için Ekom API'ye POST isteği atar (Geliştirme 2, 3, 4, 5)."""
     payload = {
         "keywords": mpn,
         "limit": 5,
         "offset": 0
     }
+    
+    # YENİ EKLENEN KISIM: API Anahtarını başlık olarak gönderiyoruz
+    basliklar = {
+        "Content-Type": "application/json"
+    }
+    if EKOM_API_KEY:
+        # NOT: Eğer Ekom ekibi anahtarın isminin "x-api-key" veya "Authorization" 
+        # olması gerektiğini söylerse, aşağıdaki "Ocp-Apim-Subscription-Key" yazısını değiştirin.
+        basliklar["Ocp-Apim-Subscription-Key"] = EKOM_API_KEY
+
     try:
-        resp = EKOM_OTURUM.post(EKOM_API_URL, json=payload, timeout=15)
+        resp = EKOM_OTURUM.post(EKOM_API_URL, json=payload, headers=basliklar, timeout=15)
         
-        # Güvenli JSON ve Hata Yakalama (Geliştirme 4)
         if resp.status_code != 200:
             print(f"[Ekom API HTTP Hatası] MPN: {mpn}, Code: {resp.status_code}, Body: {resp.text[:200]}")
             return _bos_parca_sonucu(f"HTTP Hatası {resp.status_code}")
             
         data = resp.json()
         
-        # GraphQL / API Mantıksal Hata Kontrolü (Geliştirme 3)
         if "errors" in data or "Error" in data:
             hata_mesaji = str(data.get("errors") or data.get("Error"))
             print(f"[Ekom API Mantıksal Hata] MPN: {mpn}, Detay: {hata_mesaji[:200]}")
@@ -138,7 +142,7 @@ def ekom_istek_at(mpn: str) -> dict:
 
         return _ekom_json_ayristir(data)
         
-    except Exception as e: # Bare except düzeltildi (Geliştirme 5)
+    except Exception as e: 
         print(f"[Ekom Bağlantı/Sistem Hatası] MPN: {mpn}, Exception: {e}")
         return _bos_parca_sonucu(f"Sistem Hatası: {str(e)[:50]}")
 
@@ -169,9 +173,7 @@ def yasam_durumu_kategorisi_belirle(ham_metin: str) -> str:
     if any(x in metin for x in ["active", "production"]): return "Aktif"
     return "Diğer"
 
-# Ortak Metrik Hesaplama Fonksiyonu (Geliştirme 6 - Zengin Alternatifler İçin)
 def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int) -> dict:
-    """Hem ana tablo hem de alternatifler için risk, stok, fiyat hesaplar."""
     if sonuc.get("hata"): return {"risk": 50, "karsilama": 0, "toplam_stok": 0, "uygun_tedarikci": None, "fiyat_metni": "-", "maliyet_metni": "-"}
     if not sonuc.get("bulundu"): return {"risk": 100, "karsilama": 0, "toplam_stok": 0, "uygun_tedarikci": None, "fiyat_metni": "-", "maliyet_metni": "-"}
     
@@ -180,7 +182,6 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int) -> dict:
     toplam_stok = sum((t[4] or 0) for t in teklifler)
     karsilama = min((toplam_stok / gereken_miktar * 100) if gereken_miktar > 0 else 0, 999)
 
-    # Risk Mantığı
     if yasam == "EOL": risk = 95
     elif not teklifler: risk = 90
     else:
@@ -191,7 +192,6 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int) -> dict:
             risk = 35 if stoklu_tedarikci == 1 else 10
         if yasam == "NRND": risk = min(risk + 20, 89)
 
-    # Tedarikçi/Fiyat Mantığı
     uygun = [t for t in teklifler if (t[4] or 0) >= gereken_miktar]
     if uygun:
         uygun.sort(key=lambda t: (t[1] is None, t[1]))
@@ -214,7 +214,6 @@ def excele_donustur(df: pd.DataFrame) -> bytes:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def ai_yanit_getir(prompt: str, api_key: str, model_name: str) -> str:
-    """AI yanıtlarını önbellekler (Geliştirme 3 - Token Optimizasyonu)"""
     genai.configure(api_key=api_key)
     llm = genai.GenerativeModel(model_name)
     return llm.generate_content(prompt).text
@@ -222,22 +221,22 @@ def ai_yanit_getir(prompt: str, api_key: str, model_name: str) -> str:
 # ============================================================
 # ARAYÜZ (UI)
 # ============================================================
-st.title("CircuitBOM | Ekom BOM Intelligence")
+st.title("🔌 circuitebom")
 st.markdown("BOM verilerinizi **Ekom Trial API** üzerinden zenginleştirin, riskleri analiz edin ve AI ile içgörüler oluşturun.")
 
-# YAN MENÜ
 with st.sidebar:
     st.header("⚙️ Proje Ayarları")
     yuklenen_dosya = st.file_uploader("BOM Dosyası Yükle", type=["csv", "xlsx"])
     uretim_adedi = st.number_input("Hedef Üretim Adedi:", min_value=1, value=100, step=1)
     
+    # Uyarılar Güncellendi
+    if not EKOM_API_KEY:
+        st.warning("⚠️ Ekom API anahtarı eksik (EKOM_API_KEY). Tedarik verisi çekilirken '403 Forbidden' hatası alabilirsiniz.")
     if not GEMINI_API_KEY:
         st.info("💡 Gemini API anahtarı eksik. AI asistan devre dışı.")
 
-# ANA VERİ HAZIRLIĞI
 konsolide_df = None
 
-# Tabları Başlat (Geliştirme 5 - Manuel Arama eklendi)
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📑 BOM Analiz Tablosu", "🔍 Detaylı Parça Analizi", 
     "🔄 Akıllı Konsolidasyon", "🤖 AI Asistan", "🔎 Manuel MPN Arama"
@@ -253,7 +252,7 @@ if yuklenen_dosya:
         
         konsolide_df = df.groupby(["MPN", "Manufacturer", "Description"], dropna=False).agg({"Qty": "sum", "RefDes": lambda x: ", ".join(map(str, x))}).reset_index()
 
-        with st.spinner("Ekom Trial API'den veriler çekiliyor..."):
+        with st.spinner("Ekom API'den veriler çekiliyor..."):
             ekom_map = toplu_ekom_sorgula(konsolide_df["MPN"].tolist())
 
             def satir_isleyici(row):
@@ -274,7 +273,6 @@ if yuklenen_dosya:
             sutunlar = ["Durum", "Yaşam Döngüsü", "Tedarikçi Sayısı", "İhtiyaç", "Küresel Stok", "Karşılama Oranı", "En Uygun Tedarikçi", "Birim Fiyat", "Toplam Maliyet", "Alternatif", "Risk Skoru"]
             konsolide_df[sutunlar] = konsolide_df.apply(satir_isleyici, axis=1)
 
-        # Dashboard
         toplam_usd = konsolide_df["Toplam Maliyet"].apply(lambda x: float(str(x).replace("USD", "").strip()) if "USD" in str(x) else 0.0).sum()
         karsilanamayan = (konsolide_df["En Uygun Tedarikçi"] == "Kritik (Tek Kaynak Yetersiz)").sum()
         
@@ -289,7 +287,6 @@ if yuklenen_dosya:
     except Exception as e:
         st.error(f"Sistem Hatası: {e}")
 
-# SEKME 1: BOM ANALİZ TABLOSU
 with tab1:
     if konsolide_df is not None:
         def hucre_stili(val):
@@ -305,7 +302,6 @@ with tab1:
             if val == "Aktif": return "background-color: rgba(33, 195, 84, 0.2); color: #21c354;"
             return ""
 
-        # Geliştirme 2: Kritik satır renklendirmesi
         def tedarikci_stili(val):
             if val == "Kritik (Tek Kaynak Yetersiz)": return "background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; font-weight: bold;"
             return ""
@@ -316,17 +312,15 @@ with tab1:
                                  
         st.dataframe(stil, use_container_width=True, height=500)
         
-        # Geliştirme 4: Mime parametresi
         st.download_button(
             "📥 Analizi Excel Olarak İndir", 
             data=excele_donustur(konsolide_df), 
-            file_name="nexus_bom_analizi.xlsx",
+            file_name="circuitebom_analizi.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
         st.info("Lütfen sol menüden BOM dosyası yükleyin.")
 
-# SEKME 2: DETAYLI PARÇA ANALİZİ
 with tab2:
     if konsolide_df is not None:
         secilen_mpn = st.selectbox("Analiz Edilecek Parçayı Seçin:", konsolide_df["MPN"].tolist())
@@ -347,13 +341,11 @@ with tab2:
             else:
                 st.warning("Bu parça için teklif bulunamadı.")
                 
-            st.markdown("#### 🔄 Zenginleştirilmiş Alternatifler (Geliştirme 2)")
+            st.markdown("#### 🔄 Zenginleştirilmiş Alternatifler")
             alternatifler = sonuc.get("alternatifler", [])
             if alternatifler:
-                # Alternatiflerin kendi metriklerini oluştur (Stok, Fiyat vb.)
                 alt_veriler = []
                 for alt in alternatifler:
-                    # Sanal hesaplama, sadece 1 adet üretiliyormuş gibi metrik çıkarıyoruz.
                     sanal_sonuc = {"bulundu": True, "yasam_durumu_kategori": alt["yasam"], "teklifler": [("Alt", alt["fiyat"], "USD", 1, alt["stok"], "-")] if alt["stok"] > 0 else []}
                     metrik = parca_metriklerini_hesapla(sanal_sonuc, 1)
                     alt_veriler.append({
@@ -370,7 +362,6 @@ with tab2:
             else:
                 st.info("Bu parça için sistemde alternatif bulunamadı.")
 
-# SEKME 3: AKILLI KONSOLİDASYON
 with tab3:
     if konsolide_df is not None:
         st.markdown("Aynı işlevi gören ancak farklı üreticilerden sağlanan parçaları tespit edip birleştirin.")
@@ -387,7 +378,6 @@ with tab3:
                     st.dataframe(grup[["MPN", "Manufacturer", "Birim Fiyat", "Küresel Stok", "Risk Skoru"]], use_container_width=True)
                     st.success(f"**Sistem Önerisi:** Tüm alımları **{onerilen['MPN']}** üzerinden yapın.")
 
-# SEKME 4: YAPAY ZEKA ASİSTANI
 with tab4:
     if konsolide_df is not None:
         st.markdown("BOM listenizle ilgili yapay zekaya sorular sorun.")
@@ -397,10 +387,8 @@ with tab4:
             if not GEMINI_API_KEY:
                 st.error("🔑 Ayarlardan Gemini API Key girmelisiniz.")
             else:
-                with st.spinner("🤖 Nexus AI analiz ediyor..."):
+                with st.spinner("🤖 circuitebom AI analiz ediyor..."):
                     try:
-                        # Geliştirme 3 (Token Optimizasyonu): Yapay zekaya devasa bir CSV göndermek yerine
-                        # Sadece gereken sütunları (Özet CSV) filtrelenmiş şekilde iletiyoruz.
                         ozet_df = konsolide_df[["MPN", "Description", "İhtiyaç", "Küresel Stok", "Yaşam Döngüsü", "Risk Skoru", "Birim Fiyat"]]
                         csv_metni = ozet_df.to_csv(index=False)
                         
@@ -412,7 +400,6 @@ with tab4:
                     except Exception as e:
                         st.error(f"Yapay zeka hatası: {e}")
 
-# SEKME 5: YENİ - MANUEL MPN ARAMA (Geliştirme 5)
 with tab5:
     st.markdown("### 🔍 Hızlı Parça Arama")
     st.write("Excel yüklemeden, anlık olarak Ekom veritabanından parça sorgulayın.")
@@ -425,11 +412,10 @@ with tab5:
         with st.spinner("Ekom aranıyor..."):
             sonuclar = toplu_ekom_sorgula(aranacak_mpnler)
             
-            # Gelen sonuçları ana tablodaki formata dönüştür
             gosterilecek_veriler = []
             for m in aranacak_mpnler:
                 s = sonuclar.get(m, _bos_parca_sonucu("Sonuç Yok"))
-                metrik = parca_metriklerini_hesapla(s, 1) # Manuel aramada varsayılan miktar: 1 adet
+                metrik = parca_metriklerini_hesapla(s, 1) 
                 gosterilecek_veriler.append({
                     "MPN": m,
                     "Durum": "Bulundu" if s["bulundu"] else "Bulunamadı",
