@@ -1,13 +1,17 @@
 # ============================================================
 # KARAR DESTEK MOTORU (Decision Support Engine)
 # ------------------------------------------------------------
-# Mevcut risk/metrik hesaplama (app.py -> parca_metriklerini_hesapla)
-# üzerine inşa edilmiş, çok kriterli (maliyet / risk / tedarik)
-# ağırlıklı bir karar katmanı. Bu modül UI'dan bağımsızdır; app.py
-# içindeki Streamlit sekmesi bu fonksiyonları çağırır.
+# Bu modül "Safi Matematik ve Mantık" katmanıdır. 
+# API istekleri, SQLite önbelleği (Cache) ve arayüzdeki manuel 
+# veri girişleri `app.py` tarafından süzülür ve bu motora 
+# temiz parametreler (fiyat, risk, stok vb.) olarak gönderilir.
+#
+# Çalışma Hiyerarşisi (app.py tarafından sağlanır):
+# 1. Kullanıcı manuel veri girdiyse -> O veri kullanılır.
+# 2. SQLite Cache'de veri varsa -> API'ye gitmeden o veri kullanılır.
+# 3. Cache'de yoksa -> Ekom Trial API'den çekilir ve buraya iletilir.
 # ============================================================
 from dataclasses import dataclass
-
 
 # ------------------------------------------------------------
 # 1) ORTAK SKORLAMA YARDIMCILARI
@@ -21,7 +25,6 @@ def _fiyat_cikar(fiyat_metni: str):
     except Exception:
         return None
 
-
 def maliyet_skoru_hesapla(fiyat: float, min_fiyat: float, max_fiyat: float) -> float:
     """Fiyatı 0-100 arasına normalize eder; DÜŞÜK fiyat -> YÜKSEK skor."""
     if fiyat is None:
@@ -31,20 +34,17 @@ def maliyet_skoru_hesapla(fiyat: float, min_fiyat: float, max_fiyat: float) -> f
     oran = (fiyat - min_fiyat) / (max_fiyat - min_fiyat)
     return round((1 - min(max(oran, 0), 1)) * 100, 1)
 
-
 def tedarik_skoru_hesapla(karsilama_yuzde: float) -> float:
     """Karşılama oranını (%) 0-100 skoruna sıkıştırır (>=100% karşılama = tam puan)."""
     if karsilama_yuzde is None:
         return 0.0
     return round(min(max(karsilama_yuzde, 0), 100), 1)
 
-
 def risk_skoru_ters_cevir(risk: float) -> float:
     """Risk skoru (0-100, yüksek=kötü) -> uygunluk skoru (yüksek=iyi)."""
     if risk is None:
         return 0.0
     return round(100 - min(max(risk, 0), 100), 1)
-
 
 def teslim_skoru_hesapla(teslim_suresi, min_teslim, max_teslim) -> float:
     """Teslim süresini (gün) 0-100 arasına normalize eder; KISA süre -> YÜKSEK skor.
@@ -57,7 +57,6 @@ def teslim_skoru_hesapla(teslim_suresi, min_teslim, max_teslim) -> float:
     oran = (teslim_suresi - min_teslim) / (max_teslim - min_teslim)
     return round((1 - min(max(oran, 0), 1)) * 100, 1)
 
-
 def moq_uygunluk_skoru(moq, gereken_miktar) -> float:
     """Minimum Sipariş Adedi (MOQ) ihtiyaçtan büyükse skoru düşürür.
     MOQ bilinmiyorsa ya da ihtiyacın altındaysa tam puan (100) verir."""
@@ -68,14 +67,10 @@ def moq_uygunluk_skoru(moq, gereken_miktar) -> float:
     fazlalik_orani = (moq - gereken_miktar) / gereken_miktar
     return round(max(100 - fazlalik_orani * 100, 0), 1)
 
-
 # ------------------------------------------------------------
 # 1.b) DÖVİZ NORMALİZASYONU
 # ------------------------------------------------------------
-# Not: Bu kurlar sadece varsayılan/örnek değerlerdir. Gerçek karşılaştırma
-# için uygulama arayüzündeki "Döviz Kurları" bölümünden GÜNCEL kurları girin.
 VARSAYILAN_KUR_TABLOSU = {"USD": 1.0, "EUR": 1.08, "TRY": 0.030, "GBP": 1.27}
-
 
 def usd_karsiligi(fiyat, para_birimi: str, kur_tablosu: dict = None):
     """Farklı para birimlerindeki fiyatları ortak bir birime (USD) çevirir,
@@ -83,8 +78,6 @@ def usd_karsiligi(fiyat, para_birimi: str, kur_tablosu: dict = None):
     if fiyat is None:
         return None
     tablo = kur_tablosu or VARSAYILAN_KUR_TABLOSU
-    # para_birimi boş/None/NaN (örn. data_editor'da doldurulmamış bir hücre) olabilir;
-    # bu durumda NaN != NaN olduğu için standart 'or' kontrolü yetmez, ayrıca kontrol et.
     if not para_birimi or para_birimi != para_birimi:
         para_birimi = "USD"
     try:
@@ -95,7 +88,6 @@ def usd_karsiligi(fiyat, para_birimi: str, kur_tablosu: dict = None):
         return round(float(fiyat) * carpan, 4)
     except Exception:
         return None
-
 
 @dataclass
 class Agirliklar:
@@ -109,7 +101,6 @@ class Agirliklar:
         toplam = max(maliyet + risk + tedarik + teslim, 1e-9)
         return cls(maliyet / toplam, risk / toplam, tedarik / toplam, teslim / toplam)
 
-
 def agirlikli_skor(maliyet_skoru: float, risk_skoru: float, tedarik_skoru: float,
                     teslim_skoru: float, agirlik: Agirliklar) -> float:
     return round(
@@ -119,7 +110,6 @@ def agirlikli_skor(maliyet_skoru: float, risk_skoru: float, tedarik_skoru: float
         + teslim_skoru * agirlik.teslim,
         1,
     )
-
 
 # ------------------------------------------------------------
 # 1.c) AĞIRLIK SEÇİMİNE GÖRE SÖZEL TAVSİYE
@@ -147,10 +137,7 @@ _KRITER_BILGI = {
     },
 }
 
-
 def agirlik_yorumla(agirlik: "Agirliklar") -> list:
-    """Seçilen ağırlıklara göre kullanıcıya sözel/insan-okunur tavsiyeler üretir.
-    Örn: 'Teslimat süresine öncelik verdiniz -> maliyet ve risk toleransınız arttı.'"""
     degerler = {
         "maliyet": agirlik.maliyet, "risk": agirlik.risk,
         "tedarik": agirlik.tedarik, "teslim": agirlik.teslim,
@@ -171,7 +158,7 @@ def agirlik_yorumla(agirlik: "Agirliklar") -> list:
     dusuk = _KRITER_BILGI[en_dusuk_k]
     yorumlar.append(
         f"📌 **{yuksek['ad']}** kriterine en yüksek ağırlığı verdiniz (%{en_yuksek_v*100:.0f}). "
-        f"Bunun anlamı: {yuksek['artan_yarar']}. Bedeli ise şu olabilir: {dusuk['ad'] if False else yuksek['olasi_bedel']}."
+        f"Bunun anlamı: {yuksek['artan_yarar']}. Bedeli ise şu olabilir: {yuksek['olasi_bedel']}."
     )
     yorumlar.append(
         f"⚠️ **{dusuk['ad']}** kriterine en düşük ağırlığı verdiniz (%{en_dusuk_v*100:.0f}). "
@@ -196,7 +183,6 @@ def agirlik_yorumla(agirlik: "Agirliklar") -> list:
         )
     return yorumlar
 
-
 # ------------------------------------------------------------
 # 2) TEDARİKÇİ / PARÇA SEÇİMİ + ALTERNATİF KARŞILAŞTIRMA
 # ------------------------------------------------------------
@@ -206,12 +192,9 @@ def aday_degerlendir(isim: str, fiyat_metni: str, risk: float, karsilama: float,
                       teslim_suresi=None, min_teslim=None, max_teslim=None,
                       moq=None, gereken_miktar=None,
                       para_birimi: str = "USD", kur_tablosu: dict = None) -> dict:
-    """Tek bir adayı (orijinal parça, bir Ekom alternatifi ya da manuel bir
-    tedarikçi teklifi) puanlar.
-
-    - teslim_suresi/min_teslim/max_teslim: kısa teslim -> yüksek skor (4. kriter).
-    - moq/gereken_miktar: MOQ ihtiyaçtan büyükse tedarik skoru cezalandırılır.
-    - para_birimi/kur_tablosu: fiyat, kıyaslama öncesi ortak birime (USD) çevrilir.
+    """Tek bir adayı (orijinal parça, Ekom alternatifi veya manuel tedarikçi) puanlar.
+    * Bu fonksiyon dışarıdan (app.py'den) hem Cache'lenmiş API verilerini,
+    hem de kullanıcının elle girdiği verileri kabul edecek şekilde esnektir.
     """
     fiyat_ham = _fiyat_cikar(fiyat_metni)
     fiyat = usd_karsiligi(fiyat_ham, para_birimi, kur_tablosu) if fiyat_ham is not None else None
@@ -232,12 +215,11 @@ def aday_degerlendir(isim: str, fiyat_metni: str, risk: float, karsilama: float,
         "Tedarik Skoru": t_skor, "Teslim Skoru": tsl_skor, "Karar Skoru": toplam,
     }
 
-
 def parca_karar_onerisi(adaylar: list, esik_fark: float = 8.0) -> dict:
     """
-    adaylar: aday_degerlendir() çıktılarının listesi (ilk eleman = mevcut parça).
-    Karar skoruna göre sıralar; en iyi aday mevcut parçadan belirgin şekilde
-    (esik_fark puan) iyiyse "Değiştir" önerir, EOL ise skordan bağımsız zorunlu önerir.
+    adaylar listesi içinden en yüksek Karar Skoruna sahip olanı bulur.
+    Manuel girilen veriler veya API/Cache verileri fark etmeksizin 
+    tamamen matematiksel bir kıyaslama yapar.
     """
     if not adaylar:
         return {"oneri": "Veri Yok", "detay": [], "en_iyi": None}
@@ -257,18 +239,11 @@ def parca_karar_onerisi(adaylar: list, esik_fark: float = 8.0) -> dict:
 
     return {"oneri": oneri, "detay": siralı, "en_iyi": en_iyi, "mevcut": mevcut}
 
-
 # ------------------------------------------------------------
 # 3) MALİYET OPTİMİZASYONU ÖZETİ
 # ------------------------------------------------------------
 def maliyet_optimizasyon_ozeti(konsolide_df) -> dict:
-    """
-    Konsolidasyon (aynı Description, farklı MPN) gruplarından elde edilebilecek
-    tasarrufu ve tekli-kaynak / yüksek riskli parçalardan kaynaklı maliyet
-    riskini özetler. konsolide_df: app.py'de üretilen ana tablo (pandas DataFrame).
-    """
     import pandas as pd
-
     df = konsolide_df.copy()
     df["_maliyet_num"] = df["Toplam Maliyet"].apply(
         lambda x: float(str(x).replace("USD", "").strip()) if "USD" in str(x) else None
@@ -307,13 +282,11 @@ def maliyet_optimizasyon_ozeti(konsolide_df) -> dict:
         "yuksek_riskli_maliyet": round(float(yuksek_riskli_maliyet or 0), 2),
     }
 
-
 # ------------------------------------------------------------
-# 4) YAP YA DA SATIN AL (İç Üretim vs. Sözleşmeli Üretim/EMS)
+# 4) YAP YA DA SATIN AL (İç Üretim vs. EMS)
 # ------------------------------------------------------------
 def yap_sat_al_hesapla(adet: int, ic_sabit_maliyet: float, ic_birim_maliyet: float,
                         dis_sabit_maliyet: float, dis_birim_maliyet: float) -> dict:
-    """Basit toplam-maliyet karşılaştırması + başabaş (breakeven) hacmi."""
     ic_toplam = ic_sabit_maliyet + ic_birim_maliyet * adet
     dis_toplam = dis_sabit_maliyet + dis_birim_maliyet * adet
 
@@ -336,24 +309,18 @@ def yap_sat_al_hesapla(adet: int, ic_sabit_maliyet: float, ic_birim_maliyet: flo
         "breakeven_adet": round(breakeven) if breakeven else None,
     }
 
-
 def yap_sat_al_egri_verisi(ic_sabit_maliyet: float, ic_birim_maliyet: float,
                             dis_sabit_maliyet: float, dis_birim_maliyet: float,
                             max_adet: int, nokta_sayisi: int = 30) -> dict:
-    """Grafik için: artan üretim adedine göre iki maliyet eğrisi."""
     adimlar = max(1, max_adet // nokta_sayisi) or 1
     adetler = list(range(0, max_adet + adimlar, adimlar))
     ic_egri = [ic_sabit_maliyet + ic_birim_maliyet * a for a in adetler]
     dis_egri = [dis_sabit_maliyet + dis_birim_maliyet * a for a in adetler]
     return {"adetler": adetler, "ic_egri": ic_egri, "dis_egri": dis_egri}
 
-
 def yap_sat_al_duyarlilik(adet: int, ic_sabit_maliyet: float, ic_birim_maliyet: float,
                            dis_sabit_maliyet: float, dis_birim_maliyet: float,
                            degisim_yuzdesi: float = 15.0) -> dict:
-    """Duyarlılık (tornado) analizi: her bir girdiyi tek tek +/- degisim_yuzdesi
-    kadar oynatıp başabaş (breakeven) adedinin ne kadar değiştiğini gösterir.
-    Böylece 'hangi varsayım kararı en çok etkiliyor' sorusuna cevap verir."""
     taban = yap_sat_al_hesapla(adet, ic_sabit_maliyet, ic_birim_maliyet,
                                 dis_sabit_maliyet, dis_birim_maliyet)
     taban_breakeven = taban["breakeven_adet"]
@@ -388,14 +355,8 @@ def yap_sat_al_duyarlilik(adet: int, ic_sabit_maliyet: float, ic_birim_maliyet: 
 
     return {"taban_breakeven": taban_breakeven, "detay": sonuclar, "degisim_yuzdesi": degisim_yuzdesi}
 
-
 def parca_degisim_breakeven(mevcut_birim_fiyat: float, alternatif_birim_fiyat: float,
                              gecis_maliyeti: float = 0.0):
-    """Bir parçayı alternatifiyle değiştirmenin kaç adette karlı hale geleceğini
-    hesaplar (yeniden nitelendirme/mühendislik/test gibi tek seferlik geçiş
-    maliyetini, birim fiyat farkının karşılaması gereken adet).
-    Alternatif daha pahalıysa (ya da eşitse) None döner: geçişin hiçbir adette
-    'geri ödemesi' olmaz."""
     if mevcut_birim_fiyat is None or alternatif_birim_fiyat is None:
         return None
     fark = mevcut_birim_fiyat - alternatif_birim_fiyat
