@@ -79,7 +79,8 @@ def secret_veya_env(anahtar: str) -> str:
 GEMINI_API_KEY = secret_veya_env("GEMINI_API_KEY")
 GEMINI_MODEL_NAME = "gemini-3.6-flash"
 
-REQUIRED_COLUMNS = ["MPN", "Manufacturer", "Description", "Qty", "RefDes"]
+# YENİLİK 1: Manufacturer sütunu zorunluluktan çıkarıldı (Yoksa API'den çekilecek)
+REQUIRED_COLUMNS = ["MPN", "Description", "Qty", "RefDes"]
 
 MANUEL_TEKLIF_KOLONLARI = ["MPN", "Tedarikçi", "Fiyat", "Para Birimi", "MOQ", "Stok", "Teslim Süresi (gün)", "Not"]
 if "manuel_teklifler" not in st.session_state:
@@ -298,7 +299,7 @@ def _agirlik_degisti(degisen: str):
 # ============================================================
 EKOM_API_URL = "https://developer-ekom.azurewebsites.net/api/v1/products/KeywordSearch"
 EKOM_OTURUM = requests.Session()
-TOPLU_SORGU_WORKER_SAYISI = 5
+TOPLU_SORGU_WORKER_SAYISI = 50
 
 
 def _cache_db_baglan() -> sqlite3.Connection:
@@ -748,18 +749,64 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 
 if yuklenen_dosya:
     try:
-        df = pd.read_csv(yuklenen_dosya) if yuklenen_dosya.name.endswith(".csv") else pd.read_excel(yuklenen_dosya)
+        # YENİLİK 2: CSV ayırıcılarını ve UTF-8 BOM gizli karakterini akıllı tespit etme 
+        if yuklenen_dosya.name.endswith(".csv"):
+            try:
+                # UTF-8 BOM hatasını çözmek için 'utf-8-sig' kullanıyoruz
+                df = pd.read_csv(yuklenen_dosya, sep=",", encoding="utf-8-sig")
+                if len(df.columns) < 2 and ";" in df.columns[0]:
+                    yuklenen_dosya.seek(0)
+                    df = pd.read_csv(yuklenen_dosya, sep=";", encoding="utf-8-sig")
+            except Exception:
+                yuklenen_dosya.seek(0)
+                df = pd.read_csv(yuklenen_dosya, sep=";", encoding="utf-8-sig")
+        else:
+            df = pd.read_excel(yuklenen_dosya)
+            
+        # AKILLI SÜTUN EŞLEŞTİRME (Büyük/küçük harf ve isimlendirme toleransı)
+        mevcut_sutunlar = {str(c).strip().upper(): c for c in df.columns}
+        
+        if "MPN" in mevcut_sutunlar: 
+            df.rename(columns={mevcut_sutunlar["MPN"]: "MPN"}, inplace=True)
+            
+        if "QTY" in mevcut_sutunlar: 
+            df.rename(columns={mevcut_sutunlar["QTY"]: "Qty"}, inplace=True)
+            
+        if "REFDEF" in mevcut_sutunlar: 
+            df.rename(columns={mevcut_sutunlar["REFDEF"]: "RefDes"}, inplace=True)
+        elif "REFDES" in mevcut_sutunlar: 
+            df.rename(columns={mevcut_sutunlar["REFDES"]: "RefDes"}, inplace=True)
+            
+        if "DESCRIPTION" in mevcut_sutunlar: 
+            df.rename(columns={mevcut_sutunlar["DESCRIPTION"]: "Description"}, inplace=True)
+        else:
+            df["Description"] = "-"  # Dosyada yoksa boşluk bırakıp devam et
+            
+        if "MANUFACTURER" in mevcut_sutunlar:
+            df.rename(columns={mevcut_sutunlar["MANUFACTURER"]: "Manufacturer"}, inplace=True)
+        else:
+            df["Manufacturer"] = "Bilinmiyor"
+            
         eksik_sutunlar = [c for c in REQUIRED_COLUMNS if c not in df.columns]
         if eksik_sutunlar:
-            st.error(f"Eksik Sütunlar: {', '.join(eksik_sutunlar)}")
+            st.error(f"Sütun isimleri tamir edilemedi. Lütfen şu sütunları kontrol et: {', '.join(eksik_sutunlar)}")
             st.stop()
 
         konsolide_df = df.groupby(["MPN", "Manufacturer", "Description"], dropna=False).agg(
             {"Qty": "sum", "RefDes": lambda x: ", ".join(map(str, x))}
         ).reset_index()
 
+            
         with st.spinner("Ekom Trial API'den veriler çekiliyor (önbellekte olanlar anında gelir)..."):
             ekom_map = toplu_ekom_sorgula(konsolide_df["MPN"].tolist(), zorla_yenile=st.session_state.get("zorla_yenile_checkbox", False))
+            
+            # YENİLİK 1 Devamı: "Bilinmiyor" olan üreticileri API'den dönen değerle güncelle
+            for idx, row in konsolide_df.iterrows():
+                mevcut_mfg = str(row["Manufacturer"]).strip()
+                if pd.isna(row["Manufacturer"]) or mevcut_mfg in ["Bilinmiyor", "nan", "None", ""]:
+                    api_mfg = ekom_map.get(row["MPN"], {}).get("uretici", "-")
+                    if api_mfg and api_mfg != "-":
+                        konsolide_df.at[idx, "Manufacturer"] = api_mfg
 
             def satir_isleyici(row):
                 mpn, birim_qty = row["MPN"], row["Qty"]
@@ -1385,7 +1432,19 @@ with tab6:
                 )
                 if teklif_dosya is not None:
                     try:
-                        yeni_df = pd.read_csv(teklif_dosya) if teklif_dosya.name.endswith(".csv") else pd.read_excel(teklif_dosya)
+                        # YENİLİK 2: Teklif yüklemesi için de ayırıcı düzeltmesi
+                        if teklif_dosya.name.endswith(".csv"):
+                            try:
+                                yeni_df = pd.read_csv(teklif_dosya, sep=",")
+                                if len(yeni_df.columns) < 2 and ";" in yeni_df.columns[0]:
+                                    teklif_dosya.seek(0)
+                                    yeni_df = pd.read_csv(teklif_dosya, sep=";")
+                            except Exception:
+                                teklif_dosya.seek(0)
+                                yeni_df = pd.read_csv(teklif_dosya, sep=";")
+                        else:
+                            yeni_df = pd.read_excel(teklif_dosya)
+                            
                         eksik = [c for c in MANUEL_TEKLIF_KOLONLARI if c not in yeni_df.columns]
                         if eksik:
                             st.error(f"Şablonda eksik sütunlar var: {', '.join(eksik)}")
