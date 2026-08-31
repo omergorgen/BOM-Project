@@ -828,7 +828,7 @@ with tab1:
         st.download_button(
             "📥 Analizi Excel Olarak İndir",
             data=excele_donustur(konsolide_df),
-            file_name="nexus_bom_analizi.xlsx",
+            file_name="CircuitBOM_bom_analizi.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
@@ -914,7 +914,7 @@ with tab4:
             if not GEMINI_API_KEY:
                 st.error("🔑 Ayarlardan Gemini API Key girmelisiniz.")
             else:
-                with st.spinner("🤖 Nexus AI analiz ediyor..."):
+                with st.spinner("🤖 CircuitBOM AI analiz ediyor..."):
                     try:
                         ozet_df = konsolide_df[["MPN", "Description", "İhtiyaç", "Küresel Stok", "Yaşam Döngüsü", "Risk Skoru", "Birim Fiyat"]]
                         csv_metni = ozet_df.to_csv(index=False)
