@@ -47,7 +47,7 @@ except ModuleNotFoundError as e:
 # YAPILANDIRMA & ARAYÜZ AYARLARI
 # ============================================================
 st.set_page_config(
-    page_title="CircuitBOM | BOM Intelligence",
+    page_title="CircuitBOM | BOM Intelligence (Mouser)",
     page_icon="bom_analiz_simge.ico",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -79,9 +79,11 @@ def secret_veya_env(anahtar: str) -> str:
 GEMINI_API_KEY = secret_veya_env("GEMINI_API_KEY")
 GEMINI_MODEL_NAME = "gemini-3.6-flash"
 
-# YENİLİK 1: Manufacturer sütunu zorunluluktan çıkarıldı (Yoksa API'den çekilecek)
-REQUIRED_COLUMNS = ["MPN", "Description", "Qty", "RefDes"]
+# Mouser API Key (Session üzerinden de alınabilecek şekilde yapılandırıldı)
+if "mouser_api_key" not in st.session_state:
+    st.session_state.mouser_api_key = secret_veya_env("MOUSER_API_KEY")
 
+REQUIRED_COLUMNS = ["MPN", "Description", "Qty", "RefDes"]
 MANUEL_TEKLIF_KOLONLARI = ["MPN", "Tedarikçi", "Fiyat", "Para Birimi", "MOQ", "Stok", "Teslim Süresi (gün)", "Not"]
 if "manuel_teklifler" not in st.session_state:
     st.session_state.manuel_teklifler = pd.DataFrame(columns=MANUEL_TEKLIF_KOLONLARI)
@@ -104,20 +106,18 @@ if "konsolidasyon_bonus" not in st.session_state:
 if "denetim_kayitlari" not in st.session_state:
     st.session_state.denetim_kayitlari = []
 
-# Karar motoru aday hesaplarını oturum içinde tekrar tekrar üretmemek için (performans) bellek-içi önbellek
 if "_karar_aday_onbellegi" not in st.session_state:
     st.session_state["_karar_aday_onbellegi"] = {}
-# AI yanıtlarını KULLANICIYA ÖZEL (session-scoped) önbellekle
 if "_ai_yanit_onbellegi" not in st.session_state:
     st.session_state["_ai_yanit_onbellegi"] = {}
 
 VERI_DIZINI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "veri")
 GECMIS_VERI_YOLU = os.path.join(VERI_DIZINI, "gecmis_veri.csv")
 GECMIS_VERI_KOLONLARI = ["Zaman", "MPN", "Description", "Risk Skoru", "Birim Fiyat (USD)", "Küresel Stok", "Karşılama Oranı (%)"]
-GECMIS_VERI_MAX_SATIR = 50000  # bu sınırı aşınca eski veri arşivlenir (sınırsız büyümeyi önler)
+GECMIS_VERI_MAX_SATIR = 50000 
 
-EKOM_CACHE_DB_YOLU = os.path.join(VERI_DIZINI, "ekom_cache.db")
-EKOM_CACHE_TTL_SANIYE = 24 * 3600  # 24 saat sonra veri "bayat" sayılır, ama kullanıcı yine de zorla yenileyebilir
+MOUSER_CACHE_DB_YOLU = os.path.join(VERI_DIZINI, "mouser_cache.db")
+MOUSER_CACHE_TTL_SANIYE = 24 * 3600  
 
 
 # ============================================================
@@ -169,11 +169,11 @@ def _hucre_stili(val):
 
 
 def _yasam_stili(val):
-    if val in ("Obsolete", "EOL"):
+    if val in ("Obsolete", "EOL", "Not Recommended for New Design"):
         return "background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; font-weight: bold;"
     if val == "NRND":
         return "background-color: rgba(255, 164, 33, 0.2); color: #ffa421;"
-    if val == "Aktif":
+    if val in ("Aktif", "Active"):
         return "background-color: rgba(33, 195, 84, 0.2); color: #21c354;"
     return ""
 
@@ -253,7 +253,6 @@ def _override_denetim_kaydet(eski_df: "pd.DataFrame", yeni_df: "pd.DataFrame"):
                 })
 
 
-# Karar Destek ağırlıkları (0-100 arası, toplamı her zaman 100'e sabitlenir)
 if "agirlik_degerleri" not in st.session_state:
     st.session_state.agirlik_degerleri = {"maliyet": 30.0, "risk": 25.0, "tedarik": 25.0, "teslim": 20.0}
 
@@ -297,16 +296,16 @@ def _agirlik_degisti(degisen: str):
 # ============================================================
 # KALICI YEREL ÖNBELLEK (SQLite)
 # ============================================================
-EKOM_API_URL = "https://developer-ekom.azurewebsites.net/api/v1/products/KeywordSearch"
-EKOM_OTURUM = requests.Session()
+MOUSER_API_URL = "https://api.mouser.com/api/v2/search/keyword"
+MOUSER_OTURUM = requests.Session()
 TOPLU_SORGU_WORKER_SAYISI = 50
 
 
 def _cache_db_baglan() -> sqlite3.Connection:
     os.makedirs(VERI_DIZINI, exist_ok=True)
-    conn = sqlite3.connect(EKOM_CACHE_DB_YOLU, timeout=10, check_same_thread=False)
+    conn = sqlite3.connect(MOUSER_CACHE_DB_YOLU, timeout=10, check_same_thread=False)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS ekom_cache (
+        CREATE TABLE IF NOT EXISTS mouser_cache (
             mpn TEXT PRIMARY KEY,
             veri_json TEXT NOT NULL,
             cekilme_zamani REAL NOT NULL
@@ -315,11 +314,11 @@ def _cache_db_baglan() -> sqlite3.Connection:
     return conn
 
 
-def _cache_dan_oku(mpn: str, ttl_saniye: int = EKOM_CACHE_TTL_SANIYE):
+def _cache_dan_oku(mpn: str, ttl_saniye: int = MOUSER_CACHE_TTL_SANIYE):
     try:
         conn = _cache_db_baglan()
         satir = conn.execute(
-            "SELECT veri_json, cekilme_zamani FROM ekom_cache WHERE mpn = ?", (mpn,)
+            "SELECT veri_json, cekilme_zamani FROM mouser_cache WHERE mpn = ?", (mpn,)
         ).fetchone()
         conn.close()
         if not satir:
@@ -337,7 +336,7 @@ def _cache_e_yaz(mpn: str, sonuc: dict):
     try:
         conn = _cache_db_baglan()
         conn.execute(
-            "INSERT INTO ekom_cache (mpn, veri_json, cekilme_zamani) VALUES (?, ?, ?) "
+            "INSERT INTO mouser_cache (mpn, veri_json, cekilme_zamani) VALUES (?, ?, ?) "
             "ON CONFLICT(mpn) DO UPDATE SET veri_json=excluded.veri_json, cekilme_zamani=excluded.cekilme_zamani",
             (mpn, json.dumps(sonuc, ensure_ascii=False, default=str), time.time())
         )
@@ -350,7 +349,7 @@ def _cache_e_yaz(mpn: str, sonuc: dict):
 def cache_tamamini_temizle():
     try:
         conn = _cache_db_baglan()
-        conn.execute("DELETE FROM ekom_cache")
+        conn.execute("DELETE FROM mouser_cache")
         conn.commit()
         conn.close()
     except Exception as e:
@@ -360,7 +359,7 @@ def cache_tamamini_temizle():
 def cache_istatistik() -> dict:
     try:
         conn = _cache_db_baglan()
-        satir = conn.execute("SELECT COUNT(*), MIN(cekilme_zamani), MAX(cekilme_zamani) FROM ekom_cache").fetchone()
+        satir = conn.execute("SELECT COUNT(*), MIN(cekilme_zamani), MAX(cekilme_zamani) FROM mouser_cache").fetchone()
         conn.close()
         adet, ilk, son = satir
         return {"adet": adet or 0, "ilk_cekim": ilk, "son_cekim": son}
@@ -369,7 +368,7 @@ def cache_istatistik() -> dict:
 
 
 # ============================================================
-# EKOM API İŞLEMLERİ
+# MOUSER API İŞLEMLERİ
 # ============================================================
 def _bos_parca_sonucu(hata=None) -> dict:
     return {
@@ -379,50 +378,66 @@ def _bos_parca_sonucu(hata=None) -> dict:
     }
 
 
-def _ekom_json_ayristir(data: dict) -> dict:
-    urunler = data.get("Products") or data.get("Results") or data.get("products") or []
-    if not urunler and isinstance(data, list):
-        urunler = data
+def _mouser_json_ayristir(data: dict) -> dict:
+    hatalar = data.get("Errors", [])
+    if hatalar:
+        hata_mesaji = hatalar[0].get("Message", "Bilinmeyen API Hatası")
+        return _bos_parca_sonucu(f"API Hatası: {hata_mesaji}")
+
+    search_results = data.get("SearchResults", {})
+    urunler = search_results.get("Parts", [])
 
     if not urunler:
         return _bos_parca_sonucu(None)
 
     ilk_urun = urunler[0]
 
-    aciklama = ilk_urun.get("ProductDescription") or ilk_urun.get("Description") or "-"
-    uretici = (ilk_urun.get("Manufacturer") or {}).get("Name") or ilk_urun.get("ManufacturerName") or "-"
+    aciklama = ilk_urun.get("Description") or "-"
+    uretici = ilk_urun.get("Manufacturer") or "-"
 
-    statu_obj = ilk_urun.get("ProductStatus") or ilk_urun.get("Status") or "Bilinmiyor"
-    yasam_durumu_ham = statu_obj.get("Status") if isinstance(statu_obj, dict) else statu_obj
+    yasam_durumu_ham = ilk_urun.get("LifecycleStatus") or "Bilinmiyor"
     yasam_kategori = yasam_durumu_kategorisi_belirle(str(yasam_durumu_ham))
 
-    toplam_stok = ilk_urun.get("QuantityAvailable") or 0
+    # Mouser Stok Miktarı (örn: "244 In Stock" döner, sadece rakamları almalıyız)
+    raw_stok = ilk_urun.get("Availability") or "0"
+    try:
+        rakamlar = "".join(filter(str.isdigit, str(raw_stok)))
+        toplam_stok = int(rakamlar) if rakamlar else 0
+    except:
+        toplam_stok = 0
+
     teklifler = []
-    fiyat_listesi = ilk_urun.get("StandardPricing") or ilk_urun.get("Pricing") or []
+    fiyat_listesi = ilk_urun.get("PriceBreaks", [])
 
-    if fiyat_listesi:
-        for f in fiyat_listesi:
-            qty = f.get("Quantity") or f.get("Break") or 1
-            price = f.get("UnitPrice") or f.get("Price") or 0.0
-            teklifler.append(["Ekom/DigiKey", price, "USD", qty, toplam_stok, "-"])
-    elif ilk_urun.get("UnitPrice"):
-        teklifler.append(["Ekom/DigiKey", ilk_urun.get("UnitPrice"), "USD", 1, toplam_stok, "-"])
-
+    for f in fiyat_listesi:
+        raw_qty = f.get("Quantity") or 1
+        try: qty = int(float(raw_qty))
+        except: qty = 1
+        
+        # Mouser Fiyatı (örn: "$0.52" veya "€0.52" dönebilir)
+        raw_price = f.get("Price") or "0.0"
+        try:
+            price_str = raw_price.replace("$", "").replace("€", "").replace(",", "").strip()
+            price = float(price_str)
+        except:
+            price = 0.0
+        
+        link = ilk_urun.get("ProductDetailUrl") or "-"
+        teklifler.append(["Mouser", price, f.get("Currency", "USD"), qty, toplam_stok, link])
+        
     teklifler.sort(key=lambda t: (t[1] is None, t[1]))
 
-    alternatifler_ham = ilk_urun.get("Alternates") or ilk_urun.get("SimilarParts") or []
+    # Mouser "SuggestedReplacement" alanını alternatif olarak değerlendirebiliriz
     alternatifler = []
-    for alt in alternatifler_ham:
-        alt_statu = alt.get("ProductStatus") or {}
-        alt_yasam_ham = alt_statu.get("Status") if isinstance(alt_statu, dict) else str(alt_statu)
-
+    yedek = ilk_urun.get("SuggestedReplacement")
+    if yedek and str(yedek).strip():
         alternatifler.append({
-            "mpn": alt.get("ManufacturerProductNumber") or alt.get("MPN") or "-",
-            "isim": alt.get("ProductDescription") or alt.get("Description") or "-",
-            "link": alt.get("ProductUrl") or "-",
-            "stok": alt.get("QuantityAvailable") or 0,
-            "fiyat": alt.get("UnitPrice") or 0.0,
-            "yasam": yasam_durumu_kategorisi_belirle(alt_yasam_ham)
+            "mpn": str(yedek),
+            "isim": f"Önerilen Yedek ({yedek})",
+            "link": "-",
+            "stok": 0,
+            "fiyat": 0.0,
+            "yasam": "Bilinmiyor"
         })
 
     return {
@@ -431,70 +446,83 @@ def _ekom_json_ayristir(data: dict) -> dict:
         "yasam_durumu_kategori": yasam_kategori, "alternatifler": alternatifler, "hata": None
     }
 
+def mouser_istek_at(mpn: str, max_deneme: int = 3) -> dict:
+    api_key = st.session_state.get("mouser_api_key")
+    if not api_key:
+        return _bos_parca_sonucu("Mouser API Anahtarı Bulunamadı")
 
-def ekom_istek_at(mpn: str, max_deneme: int = 3) -> dict:
-    payload = {"keywords": mpn, "limit": 5, "offset": 0}
+    url = f"{MOUSER_API_URL}?apiKey={api_key}"
+    payload = {
+        "SearchByKeywordRequest": {
+            "keyword": mpn,
+            "records": 10,
+            "startingRecord": 0,
+            "searchOptions": "string",
+            "searchWithYourSignUpLanguage": "string"
+        }
+    }
+    
+    headers = {"Content-Type": "application/json"}
     son_hata = None
+
     for deneme in range(1, max_deneme + 1):
         try:
-            resp = EKOM_OTURUM.post(EKOM_API_URL, json=payload, timeout=15)
+            resp = MOUSER_OTURUM.post(url, json=payload, headers=headers, timeout=15)
 
             if resp.status_code == 429:
                 bekleme = (2 ** deneme) + random.uniform(0, 1)
-                print(f"[Ekom API Rate Limit] MPN: {mpn}, {bekleme:.1f}sn bekleniyor (deneme {deneme}/{max_deneme})")
+                print(f"[Mouser API Rate Limit] MPN: {mpn}, {bekleme:.1f}sn bekleniyor (deneme {deneme}/{max_deneme})")
                 son_hata = "HTTP Hatası 429 (Rate Limit)"
                 time.sleep(bekleme)
                 continue
 
+            if resp.status_code == 401 or resp.status_code == 403:
+                return _bos_parca_sonucu(f"Yetkilendirme Hatası (API Key hatalı veya süresi dolmuş)")
+
             if resp.status_code != 200:
-                print(f"[Ekom API HTTP Hatası] MPN: {mpn}, Code: {resp.status_code}, Body: {resp.text[:200]}")
+                print(f"[Mouser API HTTP Hatası] MPN: {mpn}, Code: {resp.status_code}, Body: {resp.text[:200]}")
                 return _bos_parca_sonucu(f"HTTP Hatası {resp.status_code}")
 
             try:
                 data = resp.json()
             except ValueError as e:
-                print(f"[Ekom JSON Parse Hatası] MPN: {mpn}, Hata: {e}")
+                print(f"[Mouser JSON Parse Hatası] MPN: {mpn}, Hata: {e}")
                 return _bos_parca_sonucu("Geçersiz JSON yanıtı")
 
-            if "errors" in data or "Error" in data:
-                hata_mesaji = str(data.get("errors") or data.get("Error"))
-                print(f"[Ekom API Mantıksal Hata] MPN: {mpn}, Detay: {hata_mesaji[:200]}")
-                return _bos_parca_sonucu("API Hatası: Kota/Parametre sorunu")
-
-            return _ekom_json_ayristir(data)
+            return _mouser_json_ayristir(data)
 
         except requests.exceptions.Timeout:
             son_hata = "Zaman Aşımı"
-            print(f"[Ekom Timeout] MPN: {mpn}, deneme {deneme}/{max_deneme}")
+            print(f"[Mouser Timeout] MPN: {mpn}, deneme {deneme}/{max_deneme}")
             time.sleep(1.5 * deneme)
         except requests.exceptions.RequestException as e:
             son_hata = f"Bağlantı Hatası: {str(e)[:50]}"
-            print(f"[Ekom Bağlantı Hatası] MPN: {mpn}, Exception: {e}")
+            print(f"[Mouser Bağlantı Hatası] MPN: {mpn}, Exception: {e}")
             time.sleep(1.0 * deneme)
         except Exception as e:
-            print(f"[Ekom Sistem Hatası] MPN: {mpn}, Exception: {e}")
+            print(f"[Mouser Sistem Hatası] MPN: {mpn}, Exception: {e}")
             return _bos_parca_sonucu(f"Sistem Hatası: {str(e)[:50]}")
 
     return _bos_parca_sonucu(son_hata or "Bilinmeyen hata (tüm denemeler başarısız)")
 
 
-def ekom_veri_getir(mpn: str, zorla_yenile: bool = False) -> dict:
+def mouser_veri_getir(mpn: str, zorla_yenile: bool = False) -> dict:
     if not zorla_yenile:
         onbellek = _cache_dan_oku(mpn)
         if onbellek is not None:
             return onbellek
-    sonuc = ekom_istek_at(mpn)
+    sonuc = mouser_istek_at(mpn)
     if not sonuc.get("hata"):
         _cache_e_yaz(mpn, sonuc)
     return sonuc
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def _ekom_veri_getir_oturum_katmani(mpn: str, zorla_yenile: bool = False) -> dict:
-    return ekom_veri_getir(mpn, zorla_yenile=zorla_yenile)
+def _mouser_veri_getir_oturum_katmani(mpn: str, zorla_yenile: bool = False) -> dict:
+    return mouser_veri_getir(mpn, zorla_yenile=zorla_yenile)
 
 
-def toplu_ekom_sorgula(mpn_listesi: list, zorla_yenile: bool = False, max_workers: int = TOPLU_SORGU_WORKER_SAYISI) -> dict:
+def toplu_mouser_sorgula(mpn_listesi: list, zorla_yenile: bool = False, max_workers: int = TOPLU_SORGU_WORKER_SAYISI) -> dict:
     sonuclar = {}
     benzersiz_mpnler = list(dict.fromkeys(mpn_listesi))
 
@@ -510,7 +538,7 @@ def toplu_ekom_sorgula(mpn_listesi: list, zorla_yenile: bool = False, max_worker
     if sorgulanacaklar:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_mpn = {
-                executor.submit(_ekom_veri_getir_oturum_katmani, mpn, zorla_yenile): mpn
+                executor.submit(_mouser_veri_getir_oturum_katmani, mpn, zorla_yenile): mpn
                 for mpn in sorgulanacaklar
             }
             for future in concurrent.futures.as_completed(future_to_mpn):
@@ -527,11 +555,11 @@ def yasam_durumu_kategorisi_belirle(ham_metin: str) -> str:
     if not ham_metin or ham_metin == "-" or str(ham_metin).lower() == "none":
         return "Bilinmiyor"
     metin = str(ham_metin).lower()
-    if any(x in metin for x in ["obsolete", "eol", "end of life", "discontinued"]):
+    if any(x in metin for x in ["obsolete", "eol", "end of life", "discontinued", "not recommended for new design"]):
         return "EOL"
-    if any(x in metin for x in ["nrnd", "not recommended"]):
+    if any(x in metin for x in ["nrnd"]):
         return "NRND"
-    if any(x in metin for x in ["active", "production"]):
+    if any(x in metin for x in ["active", "production", "new"]):
         return "Aktif"
     return "Diğer"
 
@@ -583,10 +611,10 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int, override: dict 
             else:
                 if stoklu_tedarikci == 1:
                     risk = 35
-                    bilesenler.append("🟡 Tek kaynak: sadece 1 tedarikçide yeterli stok var → baz risk 35")
+                    bilesenler.append("🟡 Tek kaynak: sadece 1 teklif paketinde yeterli stok var → baz risk 35")
                 else:
                     risk = 10
-                    bilesenler.append(f"🟢 Çoklu kaynak: {stoklu_tedarikci} farklı tedarikçide yeterli stok var → baz risk 10")
+                    bilesenler.append(f"🟢 Yeterli hacim ve stok mevcut → baz risk 10")
             if yasam == "NRND":
                 onceki_risk = risk
                 risk = min(risk + 20, 89)
@@ -633,7 +661,6 @@ def excele_donustur(df: pd.DataFrame) -> bytes:
 
 
 def ai_yanit_getir(prompt: str, api_key: str, model_name: str) -> str:
-    """YENİ: Hem yeni google.genai SDK'sını destekler hem de eski kütüphane için fallback içerir."""
     onbellek = st.session_state["_ai_yanit_onbellegi"]
     anahtar = hashlib.sha256(f"{model_name}|{prompt}".encode("utf-8")).hexdigest()
     if anahtar in onbellek:
@@ -658,14 +685,23 @@ def ai_yanit_getir(prompt: str, api_key: str, model_name: str) -> str:
 # ============================================================
 # ARAYÜZ (UI)
 # ============================================================
-st.title("CircuitBOM | Ekom BOM Intelligence")
-st.markdown("BOM verilerinizi **Ekom Trial API** üzerinden zenginleştirin, riskleri analiz edin ve AI ile içgörüler oluşturun.")
+st.title("CircuitBOM | Mouser BOM Intelligence")
+st.markdown("BOM verilerinizi **Mouser Part Search API** üzerinden zenginleştirin, riskleri analiz edin ve AI ile içgörüler oluşturun.")
 
 # YAN MENÜ
 with st.sidebar:
     st.header("⚙️ Proje Ayarları")
     yuklenen_dosya = st.file_uploader("BOM Dosyası Yükle", type=["csv", "xlsx"])
     uretim_adedi = st.number_input("Hedef Üretim Adedi:", min_value=1, value=100, step=1, key="uretim_adedi_input")
+
+    st.markdown("---")
+    st.header("🔑 Mouser API Anahtarı")
+    mouser_anahtar = st.text_input("Mouser Search API Key", value=st.session_state.mouser_api_key, type="password")
+    if mouser_anahtar != st.session_state.mouser_api_key:
+        st.session_state.mouser_api_key = mouser_anahtar
+        
+    if not st.session_state.mouser_api_key:
+        st.warning("Mouser verilerinin çekilebilmesi için API Key girmelisiniz.")
 
     _cache_ist = cache_istatistik()
     with st.expander(f"🗄️ Kalıcı API Önbelleği ({_cache_ist['adet']} parça kayıtlı)"):
@@ -676,8 +712,7 @@ with st.sidebar:
         )
         zorla_yenile = st.checkbox(
             "🔄 Bu analizde tüm parçaları API'den zorla yenile (önbelleği yok say)",
-            value=False, key="zorla_yenile_checkbox",
-            help="İşaretlerseniz önbellek olsa bile tüm MPN'ler API'den yeniden sorgulanır ve önbellek güncellenir."
+            value=False, key="zorla_yenile_checkbox"
         )
         if st.button("🗑️ Kalıcı Önbelleği Tamamen Temizle"):
             cache_tamamini_temizle()
@@ -689,10 +724,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("🧭 Karar Motoru Ağırlıkları")
-    st.caption(
-        "Toplam her zaman %100'e sabitlenir: birini artırdığınızda diğerleri "
-        "otomatik olarak orantılı şekilde azalır."
-    )
+    st.caption("Toplam her zaman %100'e sabitlenir.")
     for _k in _AGIRLIK_SIRA:
         st.slider(
             _AGIRLIK_ETIKETLERI[_k], 0.0, 100.0,
@@ -715,14 +747,11 @@ with st.sidebar:
             st.markdown(_yorum)
 
     ESIK_FARK = st.slider(
-        "🔀 'Değiştirmeyi Değerlendirin' eşiği (puan)", 1.0, 30.0, 8.0, step=0.5, key="esik_fark_slider",
-        help="En iyi aday, mevcut parçadan en az bu kadar puan yüksekse "
-             "sistem değişikliği önerir. Düşük eşik = daha agresif öneriler.",
+        "🔀 'Değiştirmeyi Değerlendirin' eşiği (puan)", 1.0, 30.0, 8.0, step=0.5, key="esik_fark_slider"
     )
 
     st.markdown("---")
     with st.expander("💱 Döviz Kurları (manuel teklifler için)"):
-        st.caption("Manuel tedarikçi tekliflerini USD'ye çevirmek için kullanılır. Güncel kurlara göre düzenleyin.")
         st.session_state.kur_tablosu["EUR"] = st.number_input(
             "1 EUR = ? USD", min_value=0.0, value=float(st.session_state.kur_tablosu.get("EUR", 1.08)), step=0.01,
             key="kur_eur_input"
@@ -739,7 +768,7 @@ with st.sidebar:
 
 # ANA VERİ HAZIRLIĞI
 konsolide_df = None
-ekom_map = {}
+mouser_map = {}
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📑 BOM Analiz Tablosu", "🔍 Detaylı Parça Analizi",
@@ -749,10 +778,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 
 if yuklenen_dosya:
     try:
-        # YENİLİK 2: CSV ayırıcılarını ve UTF-8 BOM gizli karakterini akıllı tespit etme 
         if yuklenen_dosya.name.endswith(".csv"):
             try:
-                # UTF-8 BOM hatasını çözmek için 'utf-8-sig' kullanıyoruz
                 df = pd.read_csv(yuklenen_dosya, sep=",", encoding="utf-8-sig")
                 if len(df.columns) < 2 and ";" in df.columns[0]:
                     yuklenen_dosya.seek(0)
@@ -763,7 +790,6 @@ if yuklenen_dosya:
         else:
             df = pd.read_excel(yuklenen_dosya)
             
-        # AKILLI SÜTUN EŞLEŞTİRME (Büyük/küçük harf ve isimlendirme toleransı)
         mevcut_sutunlar = {str(c).strip().upper(): c for c in df.columns}
         
         if "MPN" in mevcut_sutunlar: 
@@ -780,7 +806,7 @@ if yuklenen_dosya:
         if "DESCRIPTION" in mevcut_sutunlar: 
             df.rename(columns={mevcut_sutunlar["DESCRIPTION"]: "Description"}, inplace=True)
         else:
-            df["Description"] = "-"  # Dosyada yoksa boşluk bırakıp devam et
+            df["Description"] = "-"
             
         if "MANUFACTURER" in mevcut_sutunlar:
             df.rename(columns={mevcut_sutunlar["MANUFACTURER"]: "Manufacturer"}, inplace=True)
@@ -797,21 +823,20 @@ if yuklenen_dosya:
         ).reset_index()
 
             
-        with st.spinner("Ekom Trial API'den veriler çekiliyor (önbellekte olanlar anında gelir)..."):
-            ekom_map = toplu_ekom_sorgula(konsolide_df["MPN"].tolist(), zorla_yenile=st.session_state.get("zorla_yenile_checkbox", False))
+        with st.spinner("Mouser API'den veriler çekiliyor (önbellekte olanlar anında gelir)..."):
+            mouser_map = toplu_mouser_sorgula(konsolide_df["MPN"].tolist(), zorla_yenile=st.session_state.get("zorla_yenile_checkbox", False))
             
-            # YENİLİK 1 Devamı: "Bilinmiyor" olan üreticileri API'den dönen değerle güncelle
             for idx, row in konsolide_df.iterrows():
                 mevcut_mfg = str(row["Manufacturer"]).strip()
                 if pd.isna(row["Manufacturer"]) or mevcut_mfg in ["Bilinmiyor", "nan", "None", ""]:
-                    api_mfg = ekom_map.get(row["MPN"], {}).get("uretici", "-")
+                    api_mfg = mouser_map.get(row["MPN"], {}).get("uretici", "-")
                     if api_mfg and api_mfg != "-":
                         konsolide_df.at[idx, "Manufacturer"] = api_mfg
 
             def satir_isleyici(row):
                 mpn, birim_qty = row["MPN"], row["Qty"]
                 gereken = int(birim_qty) * int(uretim_adedi)
-                sonuc = ekom_map.get(mpn, _bos_parca_sonucu("Sonuç yok"))
+                sonuc = mouser_map.get(mpn, _bos_parca_sonucu("Sonuç yok"))
                 override = override_al(mpn, st.session_state.manuel_override)
                 metrikler = parca_metriklerini_hesapla(sonuc, gereken, override=override)
                 durum = f"Hata: {sonuc['hata']}" if sonuc.get("hata") else ("Bulundu" if sonuc.get("bulundu") else "Bulunamadı")
@@ -846,7 +871,6 @@ if yuklenen_dosya:
             except Exception:
                 pass 
 
-        # Dashboard
         toplam_usd = konsolide_df["Toplam Maliyet"].apply(
             lambda x: _fiyat_parse(x) or 0.0 if "USD" in str(x) else 0.0
         ).sum()
@@ -886,7 +910,7 @@ with tab2:
     if konsolide_df is not None:
         secilen_mpn = st.selectbox("Analiz Edilecek Parçayı Seçin:", konsolide_df["MPN"].tolist())
         if secilen_mpn:
-            sonuc = ekom_map.get(secilen_mpn, {})
+            sonuc = mouser_map.get(secilen_mpn, {})
             secili_satir = konsolide_df[konsolide_df["MPN"] == secilen_mpn].iloc[0]
 
             c1, c2, c3 = st.columns(3)
@@ -932,7 +956,7 @@ with tab2:
                 alt_df = pd.DataFrame(alt_veriler)
                 st.dataframe(alt_df.style.map(_hucre_stili, subset=["Risk Skoru"]).map(_yasam_stili, subset=["Yaşam Döngüsü"]), use_container_width=True)
             else:
-                st.info("Bu parça için sistemde alternatif bulunamadı.")
+                st.info("Bu parça için sistemde alternatif bulunamadı (Mouser Part Search yedek parça önermemiş olabilir).")
 
 # SEKME 3: AKILLI KONSOLİDASYON
 with tab3:
@@ -977,15 +1001,15 @@ with tab4:
 # SEKME 5: MANUEL MPN ARAMA
 with tab5:
     st.markdown("### 🔍 Hızlı Parça Arama")
-    st.write("Excel yüklemeden, anlık olarak Ekom veritabanından parça sorgulayın (önbellekte olanlar anında gelir).")
+    st.write("Excel yüklemeden, anlık olarak Mouser veritabanından parça sorgulayın (önbellekte olanlar anında gelir).")
 
     manuel_girdi = st.text_input("MPN Girin (Virgülle ayırarak birden fazla girebilirsiniz):", placeholder="Örn: BC847, LM324, NE555")
 
     if st.button("Ara", type="primary") and manuel_girdi:
         aranacak_mpnler = [m.strip() for m in manuel_girdi.split(",") if m.strip()]
 
-        with st.spinner("Ekom aranıyor..."):
-            sonuclar = toplu_ekom_sorgula(aranacak_mpnler)
+        with st.spinner("Mouser aranıyor..."):
+            sonuclar = toplu_mouser_sorgula(aranacak_mpnler)
 
             gosterilecek_veriler = []
             for m in aranacak_mpnler:
@@ -1050,11 +1074,11 @@ def _manuel_teklif_adaylarina_donustur(mpn: str, gereken: int, manuel_df: "pd.Da
     return sonuc
 
 
-def _parca_adaylarini_olustur(row, ekom_map: dict, agirlik: "de.Agirliklar", max_alternatif: int = 4,
+def _parca_adaylarini_olustur(row, mouser_map: dict, agirlik: "de.Agirliklar", max_alternatif: int = 4,
                                manuel_df: "pd.DataFrame" = None, kur_tablosu: dict = None) -> list:
     mpn = row["MPN"]
     gereken = int(row["İhtiyaç"]) if row["İhtiyaç"] else 1
-    sonuc = ekom_map.get(mpn, _bos_parca_sonucu("Sonuç yok"))
+    sonuc = mouser_map.get(mpn, _bos_parca_sonucu("Sonuç yok"))
     alternatifler = sonuc.get("alternatifler", [])[:max_alternatif]
     manuel_kayitlar = _manuel_teklif_adaylarina_donustur(mpn, gereken, manuel_df)
 
@@ -1122,13 +1146,13 @@ def _karar_onbellek_anahtari(mpn, agirlik, esik_fark, manuel_df, kur_tablosu, ov
     )
 
 
-def _karar_adaylarini_getir(row, ekom_map: dict, agirlik: "de.Agirliklar", esik_fark: float,
+def _karar_adaylarini_getir(row, mouser_map: dict, agirlik: "de.Agirliklar", esik_fark: float,
                              manuel_df: "pd.DataFrame", kur_tablosu: dict, override_df: "pd.DataFrame") -> list:
     onbellek = st.session_state["_karar_aday_onbellegi"]
     anahtar = _karar_onbellek_anahtari(row["MPN"], agirlik, esik_fark, manuel_df, kur_tablosu, override_df)
     if anahtar in onbellek:
         return onbellek[anahtar]
-    adaylar = _parca_adaylarini_olustur(row, ekom_map, agirlik, manuel_df=manuel_df, kur_tablosu=kur_tablosu)
+    adaylar = _parca_adaylarini_olustur(row, mouser_map, agirlik, manuel_df=manuel_df, kur_tablosu=kur_tablosu)
     onbellek[anahtar] = adaylar
     return adaylar
 
@@ -1173,12 +1197,12 @@ def _manuel_teklif_adaylarini_olustur(row, manuel_df: "pd.DataFrame", agirlik: "
     return adaylar
 
 
-def _karar_ozeti_hesapla(df: "pd.DataFrame", ekom_map: dict, agirlik: "de.Agirliklar", esik_fark: float,
+def _karar_ozeti_hesapla(df: "pd.DataFrame", mouser_map: dict, agirlik: "de.Agirliklar", esik_fark: float,
                           manuel_df: "pd.DataFrame", kur_tablosu: dict) -> dict:
     sayaclar = {"koru": 0, "degistir": 0, "zorunlu": 0, "kritik": 0}
     skor_iyilesmeleri = []
     for _, row in df.iterrows():
-        adaylar = _karar_adaylarini_getir(row, ekom_map, agirlik, esik_fark, manuel_df, kur_tablosu, st.session_state.manuel_override)
+        adaylar = _karar_adaylarini_getir(row, mouser_map, agirlik, esik_fark, manuel_df, kur_tablosu, st.session_state.manuel_override)
         sonuc = de.parca_karar_onerisi(adaylar, esik_fark=esik_fark)
         oneri = sonuc["oneri"]
         skor_iyilesmeleri.append(sonuc["en_iyi"]["Karar Skoru"] - sonuc["mevcut"]["Karar Skoru"])
@@ -1210,7 +1234,7 @@ with tab6:
         # --- 6.0 MANUEL VERİ DÜZELTME -----
         with alt_sekme0:
             st.markdown(
-                "Ekom API'den gelen **Risk Skoru**, **Birim Fiyat** veya **Küresel Stok** yanlış/eksikse, "
+                "Mouser API'den gelen **Risk Skoru**, **Birim Fiyat** veya **Küresel Stok** yanlış/eksikse, "
                 "burada MPN bazında elle düzeltebilirsin. Boş bırakılan alanlar API değerini korur; "
                 "girilen değerler tüm tablo ve Karar Destek hesaplarına anında yansır."
             )
@@ -1246,7 +1270,7 @@ with tab6:
             oneri_satirlari = []
             for _, row in konsolide_df.iterrows():
                 adaylar = _karar_adaylarini_getir(
-                    row, ekom_map, KARAR_AGIRLIKLARI, ESIK_FARK,
+                    row, mouser_map, KARAR_AGIRLIKLARI, ESIK_FARK,
                     gecerli_manuel_ana, st.session_state.kur_tablosu, st.session_state.manuel_override
                 )
                 sonuc = de.parca_karar_onerisi(adaylar, esik_fark=ESIK_FARK)
@@ -1291,7 +1315,7 @@ with tab6:
             )
             secili_row = konsolide_df[konsolide_df["MPN"] == secilen_mpn6].iloc[0]
             detay_sonuc = _karar_sonuc_haritasi.get(secilen_mpn6) or de.parca_karar_onerisi(
-                _karar_adaylarini_getir(secili_row, ekom_map, KARAR_AGIRLIKLARI, ESIK_FARK,
+                _karar_adaylarini_getir(secili_row, mouser_map, KARAR_AGIRLIKLARI, ESIK_FARK,
                                         gecerli_manuel_ana, st.session_state.kur_tablosu, st.session_state.manuel_override),
                 esik_fark=ESIK_FARK
             )
@@ -1317,10 +1341,10 @@ with tab6:
                     st.rerun()
 
             with st.expander("🔍 Mevcut parçanın risk skoru nasıl hesaplandı?"):
-                _mevcut_ekom_sonuc = ekom_map.get(secilen_mpn6, {})
+                _mevcut_mouser_sonuc = mouser_map.get(secilen_mpn6, {})
                 _mevcut_gereken = int(secili_row["İhtiyaç"]) if secili_row["İhtiyaç"] else 1
                 _mevcut_override = override_al(secilen_mpn6, st.session_state.manuel_override)
-                _mevcut_metrik = parca_metriklerini_hesapla(_mevcut_ekom_sonuc, _mevcut_gereken, override=_mevcut_override)
+                _mevcut_metrik = parca_metriklerini_hesapla(_mevcut_mouser_sonuc, _mevcut_gereken, override=_mevcut_override)
                 for _bilesen in _mevcut_metrik.get("risk_bilesenleri", ["Bileşen bilgisi yok."]):
                     st.markdown(f"- {_bilesen}")
 
@@ -1432,7 +1456,6 @@ with tab6:
                 )
                 if teklif_dosya is not None:
                     try:
-                        # YENİLİK 2: Teklif yüklemesi için de ayırıcı düzeltmesi
                         if teklif_dosya.name.endswith(".csv"):
                             try:
                                 yeni_df = pd.read_csv(teklif_dosya, sep=",")
@@ -1617,7 +1640,7 @@ with tab6:
                 else:
                     with st.spinner("Senaryo hesaplanıyor..."):
                         ozet_senaryo = _karar_ozeti_hesapla(
-                            konsolide_df, ekom_map, KARAR_AGIRLIKLARI, ESIK_FARK,
+                            konsolide_df, mouser_map, KARAR_AGIRLIKLARI, ESIK_FARK,
                             gecerli_manuel_ana, st.session_state.kur_tablosu
                         )
                     st.session_state.senaryolar[senaryo_adi.strip()] = {
@@ -1745,7 +1768,7 @@ with tab6:
                 _rapor_oneri_satirlari = []
                 for _, _rrow in konsolide_df.iterrows():
                     _radaylar = _karar_adaylarini_getir(
-                        _rrow, ekom_map, KARAR_AGIRLIKLARI, ESIK_FARK, gecerli_manuel_ana,
+                        _rrow, mouser_map, KARAR_AGIRLIKLARI, ESIK_FARK, gecerli_manuel_ana,
                         st.session_state.kur_tablosu, st.session_state.manuel_override
                     )
                     _rsonuc = de.parca_karar_onerisi(_radaylar, esik_fark=ESIK_FARK)
