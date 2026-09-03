@@ -1125,8 +1125,209 @@ with tab5:
 # Sığdırmak için buradaki yardımcı işlevleri aynen kullanabilirsiniz. Arayüz sekmesini karar_adaylarini_getir() vs
 # çağırırken api_sonuclar_map -> api_sonuclar_map olarak geçirdim.
 
+def _manuel_teklif_adaylarina_donustur(mpn: str, gereken: int, manuel_df: "pd.DataFrame") -> list:
+    """Kullanıcının elle girdiği tedarikçi tekliflerini aday_degerlendir formatına çevirir."""
+    if manuel_df is None or manuel_df.empty:
+        return []
+    ilgili = manuel_df[manuel_df["MPN"].astype(str).str.strip() == str(mpn).strip()]
+    sonuc = []
+    for _, t in ilgili.iterrows():
+        try:
+            fiyat_f = float(t["Fiyat"])
+        except (ValueError, TypeError):
+            fiyat_f = None
+        try:
+            stok_f = float(t["Stok"])
+        except (ValueError, TypeError):
+            stok_f = None
+        try:
+            moq_f = float(t.get("MOQ")) if pd.notna(t.get("MOQ")) else None
+        except (ValueError, TypeError):
+            moq_f = None
+        try:
+            teslim_f = float(t.get("Teslim Süresi (gün)")) if pd.notna(t.get("Teslim Süresi (gün)")) else None
+        except (ValueError, TypeError):
+            teslim_f = None
+
+        karsilama = min((stok_f / gereken * 100) if (stok_f and gereken > 0) else 100.0, 999)
+        _pb_ham = t.get("Para Birimi")
+        para_birimi = str(_pb_ham).strip().upper() if _pb_ham and _pb_ham == _pb_ham else "USD"
+        fiyat_metni = f"{fiyat_f} {para_birimi}" if fiyat_f is not None else "-"
+        isim = f"{t.get('Tedarikçi') or 'Bilinmeyen Tedarikçi'} (Manuel)"
+        sonuc.append({
+            "isim": isim, "fiyat_metni": fiyat_metni, "karsilama": karsilama,
+            "moq": moq_f, "teslim": teslim_f, "para_birimi": para_birimi,
+        })
+    return sonuc
+
+
+def _konsolidasyon_bonus_uygula(aday: dict, tercih_tedarikci: str, bonus: float) -> dict:
+    """Öncelikli/tercih edilen tedarikçinin teklif verdiği HER parçada karar skoruna bonus ekler."""
+    if tercih_tedarikci and tercih_tedarikci != "Yok" and str(tercih_tedarikci).strip():
+        if str(tercih_tedarikci).strip().lower() in str(aday["Aday"]).lower():
+            aday["Karar Skoru"] = round(min(aday["Karar Skoru"] + bonus, 100.0), 1)
+            aday["Konsolidasyon Bonusu"] = f"+{bonus:.0f} ({tercih_tedarikci})"
+            return aday
+    aday["Konsolidasyon Bonusu"] = "-"
+    return aday
+
+
 def _karar_adaylarini_getir(row, api_map, agirlik, esik, manuel_df, kur_tablosu, override_df):
-    return st.session_state.get("_karar_aday_onbellegi", {}).get(row["MPN"], []) # Orijinal işlevin placeholderı
+    """Bir BOM satırı için Karar Destek adaylarını üretir:
+    1) Mevcut/API en uygun teklif (override uygulanmış, ana tabloyla birebir tutarlı)
+    2) api_map[mpn]['teklifler'] içindeki HER TEK teklif ayrı bir aday olarak
+       (Mouser, Nexar-X şirketi, Ekom... gerçek tedarikçi isimleriyle) — API'ye
+       tekrar sorulmaz, zaten çekilmiş/önbelleklenmiş veri kullanılır.
+    3) Kullanıcının elle girdiği manuel tedarikçi teklifleri.
+    Ağırlık/eşik değişince skor anında güncellenir; hesaplama saf matematik
+    olduğu için (ekstra API çağrısı yok) ayrıca önbelleklemeye gerek yoktur.
+    """
+    mpn = row["MPN"]
+    try:
+        gereken = int(row["İhtiyaç"]) if row["İhtiyaç"] else 1
+    except Exception:
+        gereken = 1
+
+    sonuc = api_map.get(mpn, _bos_parca_sonucu("Sonuç yok"))
+    override = override_al(mpn, override_df)
+    mevcut_metrik = parca_metriklerini_hesapla(sonuc, gereken, override=override)
+    yasam = sonuc.get("yasam_durumu_kategori", "Bilinmiyor")
+    teklifler = sonuc.get("teklifler", [])
+    manuel_kayitlar = _manuel_teklif_adaylarina_donustur(mpn, gereken, manuel_df)
+    _tercih = st.session_state.get("konsolidasyon_tercih", "Yok")
+    _bonus = st.session_state.get("konsolidasyon_bonus", 0.0)
+
+    # Ortak fiyat bandı (USD) — mevcut + her API teklifi + manuel teklifler
+    fiyatlar = [_fiyat_parse(mevcut_metrik["fiyat_metni"])]
+    for t in teklifler:
+        try:
+            fiyatlar.append(de.usd_karsiligi(t[1], t[2], kur_tablosu))
+        except Exception:
+            pass
+    for mk in manuel_kayitlar:
+        fiyatlar.append(de.usd_karsiligi(_fiyat_parse(mk["fiyat_metni"]), mk["para_birimi"], kur_tablosu))
+    gecerli_fiyatlar = [f for f in fiyatlar if f is not None]
+    min_f = min(gecerli_fiyatlar) if gecerli_fiyatlar else None
+    max_f = max(gecerli_fiyatlar) if gecerli_fiyatlar else None
+
+    teslimler = [mk["teslim"] for mk in manuel_kayitlar if mk["teslim"] is not None]
+    min_t = min(teslimler) if teslimler else None
+    max_t = max(teslimler) if teslimler else None
+
+    adaylar = [de.aday_degerlendir(
+        f"{mpn} (Mevcut/API)", mevcut_metrik["fiyat_metni"], mevcut_metrik["risk"], mevcut_metrik["karsilama"],
+        yasam, min_f, max_f, agirlik, mevcut_mi=True,
+        min_teslim=min_t, max_teslim=max_t, gereken_miktar=gereken,
+    )]
+    adaylar[0]["Konsolidasyon Bonusu"] = "-"
+
+    # Her API teklifini (Mouser, Nexar-şirket-X, Ekom...) ayrı bir aday olarak ekle
+    for t in teklifler:
+        try:
+            t = (list(t) + [None] * 6)[:6]
+            tedarikci_adi, fiyat, birim, moq_qty, stok, _link = t
+            if fiyat is None:
+                continue
+            karsilama_t = min((stok / gereken * 100) if (stok and gereken > 0) else 0.0, 999)
+            etiket = f"{tedarikci_adi} ({moq_qty}+ adet)" if moq_qty and moq_qty > 1 else str(tedarikci_adi)
+            aday = de.aday_degerlendir(
+                etiket, f"{fiyat} {birim or 'USD'}", mevcut_metrik["risk"], karsilama_t,
+                yasam, min_f, max_f, agirlik, mevcut_mi=False,
+                min_teslim=min_t, max_teslim=max_t, moq=moq_qty, gereken_miktar=gereken,
+                para_birimi=birim or "USD", kur_tablosu=kur_tablosu,
+            )
+            aday = _konsolidasyon_bonus_uygula(aday, _tercih, _bonus)
+            adaylar.append(aday)
+        except Exception:
+            continue
+
+    # Manuel tedarikçi teklifleri
+    for mk in manuel_kayitlar:
+        aday = de.aday_degerlendir(
+            mk["isim"], mk["fiyat_metni"], mevcut_metrik["risk"], mk["karsilama"], yasam,
+            min_f, max_f, agirlik, mevcut_mi=False,
+            teslim_suresi=mk["teslim"], min_teslim=min_t, max_teslim=max_t,
+            moq=mk["moq"], gereken_miktar=gereken,
+            para_birimi=mk["para_birimi"], kur_tablosu=kur_tablosu,
+        )
+        aday = _konsolidasyon_bonus_uygula(aday, _tercih, _bonus)
+        adaylar.append(aday)
+
+    return adaylar
+
+
+def _manuel_teklif_adaylarini_olustur(row, manuel_df: "pd.DataFrame", agirlik: "de.Agirliklar",
+                                       kur_tablosu: dict = None) -> list:
+    """6.4 sekmesi için: mevcut/API en uygun teklif ile kullanıcının o MPN için
+    elle girdiği tedarikçi tekliflerini karşılaştırır."""
+    mpn = row["MPN"]
+    try:
+        gereken = int(row["İhtiyaç"]) if row["İhtiyaç"] else 1
+    except Exception:
+        gereken = 1
+
+    sonuc = api_sonuclar_map.get(mpn, _bos_parca_sonucu("Sonuç yok"))
+    override = override_al(mpn, st.session_state.manuel_override)
+    mevcut_metrik = parca_metriklerini_hesapla(sonuc, gereken, override=override)
+    yasam = sonuc.get("yasam_durumu_kategori", "Bilinmiyor")
+    manuel_kayitlar = _manuel_teklif_adaylarina_donustur(mpn, gereken, manuel_df)
+
+    fiyatlar = [_fiyat_parse(mevcut_metrik["fiyat_metni"])]
+    for mk in manuel_kayitlar:
+        fiyatlar.append(de.usd_karsiligi(_fiyat_parse(mk["fiyat_metni"]), mk["para_birimi"], kur_tablosu))
+    gecerli_fiyatlar = [f for f in fiyatlar if f is not None]
+    min_f = min(gecerli_fiyatlar) if gecerli_fiyatlar else None
+    max_f = max(gecerli_fiyatlar) if gecerli_fiyatlar else None
+
+    teslimler = [mk["teslim"] for mk in manuel_kayitlar if mk["teslim"] is not None]
+    min_t = min(teslimler) if teslimler else None
+    max_t = max(teslimler) if teslimler else None
+
+    adaylar = [de.aday_degerlendir(
+        f"{mpn} (Mevcut/API)", mevcut_metrik["fiyat_metni"], mevcut_metrik["risk"], mevcut_metrik["karsilama"],
+        yasam, min_f, max_f, agirlik, mevcut_mi=True,
+        min_teslim=min_t, max_teslim=max_t, gereken_miktar=gereken,
+    )]
+    adaylar[0]["Konsolidasyon Bonusu"] = "-"
+
+    _tercih = st.session_state.get("konsolidasyon_tercih", "Yok")
+    _bonus = st.session_state.get("konsolidasyon_bonus", 0.0)
+    for mk in manuel_kayitlar:
+        aday = de.aday_degerlendir(
+            mk["isim"], mk["fiyat_metni"], mevcut_metrik["risk"], mk["karsilama"], yasam,
+            min_f, max_f, agirlik, mevcut_mi=False,
+            teslim_suresi=mk["teslim"], min_teslim=min_t, max_teslim=max_t,
+            moq=mk["moq"], gereken_miktar=gereken,
+            para_birimi=mk["para_birimi"], kur_tablosu=kur_tablosu,
+        )
+        aday = _konsolidasyon_bonus_uygula(aday, _tercih, _bonus)
+        adaylar.append(aday)
+    return adaylar
+
+
+def _karar_ozeti_hesapla(df: "pd.DataFrame", api_map: dict, agirlik: "de.Agirliklar", esik_fark: float,
+                          manuel_df: "pd.DataFrame", kur_tablosu: dict) -> dict:
+    """Senaryo kıyaslaması (6.6) için: tüm BOM'u verilen ağırlıklarla özetler."""
+    sayaclar = {"koru": 0, "degistir": 0, "zorunlu": 0, "kritik": 0}
+    skor_iyilesmeleri = []
+    for _, row in df.iterrows():
+        adaylar = _karar_adaylarini_getir(
+            row, api_map, agirlik, esik_fark, manuel_df, kur_tablosu, st.session_state.manuel_override
+        )
+        sonuc = de.parca_karar_onerisi(adaylar, esik_fark=esik_fark)
+        oneri = sonuc["oneri"]
+        skor_iyilesmeleri.append(sonuc["en_iyi"]["Karar Skoru"] - sonuc["mevcut"]["Karar Skoru"])
+        if oneri.startswith("🔄"):
+            sayaclar["degistir"] += 1
+        elif oneri.startswith("⚠️"):
+            sayaclar["zorunlu"] += 1
+        elif oneri.startswith("🛑"):
+            sayaclar["kritik"] += 1
+        elif oneri.startswith("✅"):
+            sayaclar["koru"] += 1
+    ortalama = sum(skor_iyilesmeleri) / len(skor_iyilesmeleri) if skor_iyilesmeleri else 0.0
+    sayaclar["ortalama_skor_iyilesmesi"] = round(ortalama, 1)
+    return sayaclar
 # ... Decision Engine orijinal kodu
 with tab6:
     if konsolide_df is not None:
@@ -1263,7 +1464,8 @@ with tab6:
                 for _bilesen in _mevcut_metrik.get("risk_bilesenleri", ["Bileşen bilgisi yok."]):
                     st.markdown(f"- {_bilesen}")
 
-                if (detay_sonuc.get("en_iyi") or {}).get("Aday") != (detay_sonuc.get("mevcut") or {}).get("Aday"):                st.markdown("##### 🔁 Bu Alternatife Geçişin Başabaş Noktası")
+            if (detay_sonuc.get("en_iyi") or {}).get("Aday") != (detay_sonuc.get("mevcut") or {}).get("Aday"):
+                st.markdown("##### 🔁 Bu Alternatife Geçişin Başabaş Noktası")
                 st.caption(
                     "Yeniden nitelendirme/mühendislik gibi tek seferlik bir geçiş maliyeti varsa, "
                     "kaç adet üretimde bu maliyetin 'geri ödeneceğini' hesaplar."
