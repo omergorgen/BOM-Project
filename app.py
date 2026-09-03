@@ -389,10 +389,17 @@ def _bos_parca_sonucu(hata=None) -> dict:
 MOUSER_API_URL = "https://api.mouser.com/api/v2/search/keyword"
 
 def mouser_istek_at(mpn: str) -> dict:
+    # Önce Streamlit secrets kasasına bakar, yoksa session_state'e bakar
+    api_key = None
+    try:
+        api_key = st.secrets.get("MOUSER_API_KEY")
+    except Exception:
+        pass
     
-    api_key = st.session_state.get("mouser_api_key") or "0d18dac7-0ddc-41b4-91dd-d1a28473e343"
-    
-    if not api_key or api_key.strip() == "":
+    if not api_key:
+        api_key = st.session_state.get("mouser_api_key")
+
+    if not api_key or str(api_key).strip() == "":
         return _bos_parca_sonucu("API Key Eksik")
 
     url = f"https://api.mouser.com/api/v2/search/partnumber?apiKey={api_key}"
