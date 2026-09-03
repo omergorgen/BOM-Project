@@ -389,21 +389,18 @@ def _bos_parca_sonucu(hata=None) -> dict:
 MOUSER_API_URL = "https://api.mouser.com/api/v2/search/keyword"
 
 def mouser_istek_at(mpn: str) -> dict:
-    api_key = st.session_state.get("mouser_api_key")
-    if not api_key:
-        return _bos_parca_sonucu()
-
-    url = f"{MOUSER_API_URL}?apiKey={api_key}"
     
-    # GÜNCELLEME: Mouser dökümantasyonu (image_e91d62.png) ile birebir uyumlu payload
+    api_key = st.session_state.get("mouser_api_key") or "0d18dac7-0ddc-41b4-91dd-d1a28473e343"
+    
+    if not api_key or api_key.strip() == "":
+        return _bos_parca_sonucu("API Key Eksik")
+
+    url = f"https://api.mouser.com/api/v2/search/partnumber?apiKey={api_key}"
+    
     payload = {
-        "SearchByKeywordRequest": {
-            "keyword": mpn,
-            "records": 10,
-            "startingRecord": 0,
-            "searchOptions": "None", # "Exact" aramayı kısıtlayabiliyor, "None" en geniş sonuç kümesini getirir
-            "searchWithYourSignUpLanguage": "None",
-            "mouserPaysCustomsAndDuties": False
+        "SearchByPartRequest": {
+            "mouserPartNumber": mpn,
+            "partSearchOptions": ""
         }
     }
     
@@ -414,7 +411,8 @@ def mouser_istek_at(mpn: str) -> dict:
     }
 
     try:
-        resp = GLOBAL_REQ_SESSION.post(url, json=payload, headers=headers, timeout=10)
+        print(f"\n[DEBUG] Mouser API'ye istek atılıyor -> MPN: {mpn}")
+        resp = GLOBAL_REQ_SESSION.post(url, json=payload, headers=headers, timeout=15, verify=False)
         
         if resp.status_code != 200:
             print(f"\n[MOUSER HTTP {resp.status_code} HATASI] MPN: {mpn}")
@@ -428,17 +426,20 @@ def mouser_istek_at(mpn: str) -> dict:
 
         urunler = data.get("SearchResults", {}).get("Parts", [])
         if not urunler:
-            return _bos_parca_sonucu()
+            return _bos_parca_sonucu("Parça Bulunamadı")
 
         ilk_urun = urunler[0]
         yasam_ham = ilk_urun.get("LifecycleStatus", "Bilinmiyor")
         
-        # Stok verisini güvenli bir şekilde al
-        raw_stok = ilk_urun.get("Availability", "0")
+        raw_stok_in_stock = ilk_urun.get("AvailabilityInStock", "0")
         try:
-            toplam_stok = int("".join(filter(str.isdigit, str(raw_stok))) or 0)
+            toplam_stok = int(str(raw_stok_in_stock).replace(",", "").strip())
         except Exception:
-            toplam_stok = 0
+            try:
+                raw_avail = str(ilk_urun.get("Availability", "0"))
+                toplam_stok = int("".join(filter(str.isdigit, raw_avail)) or 0)
+            except Exception:
+                toplam_stok = 0
             
         teklifler = []
         for f in ilk_urun.get("PriceBreaks", []):
@@ -464,7 +465,8 @@ def mouser_istek_at(mpn: str) -> dict:
             "hata": None
         }
     except Exception as e:
-        return _bos_parca_sonucu(f"Mouser İstek Hatası: {str(e)[:40]}")
+        print(f"\n[MOUSER KRİTİK BAĞLANTI HATASI] MPN: {mpn} -> Hata Detayı: {e}\n")
+        return _bos_parca_sonucu(f"Bağlantı Hatası: {str(e)[:50]}")
     try:
         resp = GLOBAL_REQ_SESSION.post(url, json=payload, headers=headers, timeout=10)
         if resp.status_code != 200:
