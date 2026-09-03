@@ -438,15 +438,40 @@ def mouser_istek_at(mpn: str) -> dict:
         ilk_urun = urunler[0]
         yasam_ham = ilk_urun.get("LifecycleStatus", "Bilinmiyor")
         
-        raw_stok_in_stock = ilk_urun.get("AvailabilityInStock", "0")
-        try:
-            toplam_stok = int(str(raw_stok_in_stock).replace(",", "").strip())
-        except Exception:
-            try:
-                raw_avail = str(ilk_urun.get("Availability", "0"))
-                toplam_stok = int("".join(filter(str.isdigit, raw_avail)) or 0)
-            except Exception:
-                toplam_stok = 0
+      
+        toplam_stok = 0
+        
+       
+        for anahtar in ["AvailabilityInStock", "FactoryStock"]:
+            val = ilk_urun.get(anahtar)
+            if val is not None and str(val).strip() != "":
+                try:
+                    temiz_rakam = int(str(val).replace(",", "").strip())
+                    if temiz_rakam > 0:
+                        toplam_stok = temiz_rakam
+                        break
+                except:
+                    pass
+
+        
+        if toplam_stok == 0:
+            raw_avail = str(ilk_urun.get("Availability", ""))
+            rakamlar = "".join(filter(str.isdigit, raw_avail))
+            if rakamlar:
+                try:
+                    toplam_stok = int(rakamlar)
+                except:
+                    pass
+
+        
+        on_order_list = ilk_urun.get("AvailabilityOnOrder", [])
+        if isinstance(on_order_list, list):
+            for siparis in on_order_list:
+                try:
+                    q = int(siparis.get("Quantity", 0))
+                    toplam_stok += q
+                except:
+                    pass
             
         teklifler = []
         for f in ilk_urun.get("PriceBreaks", []):
@@ -716,7 +741,7 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int, override: dict 
         
         # Çoklu API nedeniyle stok adedi şişmesin diye max değeri veya güvenilir olanı alabiliriz, şimdilik toplamını alıyoruz
         toplam_stok = sum((t[4] or 0) for t in teklifler)
-        karsilama = min((toplam_stok / gereken_miktar * 100) if gereken_miktar > 0 else 0, 999)
+        karsilama = min((toplam_stok / gereken_miktar * 100) if gereken_miktar > 0 else 0, 100)
 
         bilesenler = []
         if yasam == "EOL":
