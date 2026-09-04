@@ -438,40 +438,24 @@ def mouser_istek_at(mpn: str) -> dict:
         ilk_urun = urunler[0]
         yasam_ham = ilk_urun.get("LifecycleStatus", "Bilinmiyor")
         
-      
+      # SADECE RAFTAKİ GERÇEK FİZİKİ STOK (Web sitesiyle birebir eşleşir)
         toplam_stok = 0
+        raw_stok = ilk_urun.get("AvailabilityInStock")
+        if raw_stok is not None and str(raw_stok).strip() != "":
+            try:
+                toplam_stok = int(str(raw_stok).replace(",", "").strip())
+            except Exception:
+                pass
         
-       
-        for anahtar in ["AvailabilityInStock", "FactoryStock"]:
-            val = ilk_urun.get(anahtar)
-            if val is not None and str(val).strip() != "":
-                try:
-                    temiz_rakam = int(str(val).replace(",", "").strip())
-                    if temiz_rakam > 0:
-                        toplam_stok = temiz_rakam
-                        break
-                except:
-                    pass
-
-        
+        # Eğer AvailabilityInStock boşsa Availability metnindeki ilk sayıyı al
         if toplam_stok == 0:
             raw_avail = str(ilk_urun.get("Availability", ""))
             rakamlar = "".join(filter(str.isdigit, raw_avail))
             if rakamlar:
                 try:
                     toplam_stok = int(rakamlar)
-                except:
-                    pass
-
-        
-        on_order_list = ilk_urun.get("AvailabilityOnOrder", [])
-        if isinstance(on_order_list, list):
-            for siparis in on_order_list:
-                try:
-                    q = int(siparis.get("Quantity", 0))
-                    toplam_stok += q
-                except:
-                    pass
+                except Exception:
+                    toplam_stok = 0
             
         teklifler = []
         for f in ilk_urun.get("PriceBreaks", []):
@@ -669,19 +653,22 @@ def api_verilerini_birlestir(mpn: str, zorla_yenile: bool = False) -> dict:
         birlesik.update({"bulundu": True, "aciklama": r_ekom["aciklama"], "uretici": r_ekom["uretici"]})
 
     # Kaynak Bazlı Stok ve Fiyat Ayrıştırma Yardımcısı
-    def _kaynak_ozeti(teklif_listesi):
-        if not teklif_listesi:
-            return 0, "-"
-        stok = max([t[4] or 0 for t in teklif_listesi], default=0)
-        fiyatlar = [t[1] for t in teklif_listesi if t[1] is not None and t[1] > 0]
-        en_ucuz = min(fiyatlar) if fiyatlar else None
-        pb = teklif_listesi[0][2] if teklif_listesi else "USD"
-        fiyat_metin = f"{en_ucuz:.3f} {pb}" if en_ucuz is not None else "-"
-        return stok, fiyat_metin
+    # Mouser tekliflerini ve stoğunu ayıkla
+    mouser_teklifleri = [t for t in r_mouser.get("teklifler", []) if t[0] == "Mouser"]
+    m_stok = mouser_teklifleri[0][4] if mouser_teklifleri else 0
+    m_fiyat = f"{mouser_teklifleri[0][1]} {mouser_teklifleri[0][2]}" if (mouser_teklifleri and mouser_teklifleri[0][1] is not None) else "-"
 
-    m_stok, m_fiyat = _kaynak_ozeti(r_mouser.get("teklifler", []))
-    n_stok, n_fiyat = _kaynak_ozeti(r_nexar.get("teklifler", []))
-    e_stok, e_fiyat = _kaynak_ozeti(r_ekom.get("teklifler", []))
+    # Nexar tekliflerini ve stoğunu ayıkla
+    nexar_teklifleri = r_nexar.get("teklifler", [])
+    n_stok = max([t[4] or 0 for t in nexar_teklifleri], default=0)
+    n_fiyat_val = min([t[1] for t in nexar_teklifleri if t[1] is not None and t[1] > 0], default=None)
+    n_fiyat = f"{n_fiyat_val:.3f} USD" if n_fiyat_val is not None else "-"
+
+    # Ekom tekliflerini ve stoğunu ayıkla
+    ekom_teklifleri = r_ekom.get("teklifler", [])
+    e_stok = max([t[4] or 0 for t in ekom_teklifleri], default=0)
+    e_fiyat_val = min([t[1] for t in ekom_teklifleri if t[1] is not None and t[1] > 0], default=None)
+    e_fiyat = f"{e_fiyat_val:.3f} USD" if e_fiyat_val is not None else "-"
 
     birlesik["mouser_stok"] = m_stok
     birlesik["mouser_fiyat"] = m_fiyat
@@ -761,8 +748,26 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int, override: dict 
         yasam = sonuc.get("yasam_durumu_kategori", "Bilinmiyor")
         teklifler = sonuc.get("teklifler", [])
         
-        # Çoklu API nedeniyle stok adedi şişmesin diye max değeri veya güvenilir olanı alabiliriz, şimdilik toplamını alıyoruz
-        toplam_stok = sum((t[4] or 0) for t in teklifler)
+       
+        tedarikci_stoklari = {}
+        for t in teklifler:
+            t_adi = t[0] if len(t) > 0 else "Bilinmeyen"
+            t_stok = t[4] or 0 if len(t) > 4 else 0
+            # Aynı tedarikçinin fiyat kırılımlarını toplama, o tedarikçinin gerçek stoğunu al
+            tedarikci_stoklari[t_adi] = max(tedarikci_stoklari.get(t_adi, 0), t_stok)
+            
+        toplam_stok = sum(tedarikci_stoklari.values()) 
+
+       
+        tedarikci_stoklari = {}
+        for t in teklifler:
+            t_adi = str(t[0]) if len(t) > 0 else "Bilinmeyen"
+            t_stok = int(t[4] or 0) if len(t) > 4 else 0
+            
+            
+            tedarikci_stoklari[t_adi] = max(tedarikci_stoklari.get(t_adi, 0), t_stok)
+            
+        toplam_stok = sum(tedarikci_stoklari.values())
         karsilama = min((toplam_stok / gereken_miktar * 100) if gereken_miktar > 0 else 0, 100)
 
         bilesenler = []
@@ -1002,14 +1007,32 @@ if yuklenen_dosya:
                 durum = f"Hata: {sonuc['hata']}" if sonuc.get("hata") else ("Bulundu" if sonuc.get("bulundu") else "Bulunamadı")
 
                 return pd.Series([
-                    durum, sonuc.get("yasam_durumu_kategori", "Bilinmiyor"), len(sonuc.get("teklifler", [])),
-                    gereken, metrikler["toplam_stok"], f"%{metrikler['karsilama']:.0f}",
-                    metrikler["uygun_tedarikci"], metrikler["fiyat_metni"], metrikler["maliyet_metni"],
-                    len(sonuc.get("alternatifler", [])), metrikler["risk"]
+                    durum,
+                    sonuc.get("yasam_durumu_kategori", "Bilinmiyor"),
+                    gereken,
+                    metrikler["toplam_stok"],
+                    sonuc.get("mouser_stok", 0),
+                    sonuc.get("mouser_fiyat", "-"),
+                    sonuc.get("nexar_stok", 0),
+                    sonuc.get("nexar_fiyat", "-"),
+                    sonuc.get("ekom_stok", 0),
+                    sonuc.get("ekom_fiyat", "-"),
+                    f"%{metrikler['karsilama']:.0f}",
+                    metrikler["uygun_tedarikci"],
+                    metrikler["fiyat_metni"],
+                    metrikler["maliyet_metni"],
+                    len(sonuc.get("alternatifler", [])),
+                    metrikler["risk"]
                 ])
 
-            sutunlar = ["Durum", "Yaşam Döngüsü", "Tedarikçi Sayısı", "İhtiyaç", "Küresel Stok", "Karşılama Oranı",
-                        "En Uygun Tedarikçi", "Birim Fiyat", "Toplam Maliyet", "Alternatif", "Risk Skoru"]
+            sutunlar = [
+                "Durum", "Yaşam Döngüsü", "İhtiyaç", "Küresel Stok",
+                "Mouser Stok", "Mouser Fiyat",
+                "Nexar Stok", "Nexar Fiyat",
+                "Ekom Stok", "Ekom Fiyat",
+                "Karşılama Oranı", "En Uygun Tedarikçi", 
+                "Birim Fiyat", "Toplam Maliyet", "Alternatif", "Risk Skoru"
+            ]
             konsolide_df[sutunlar] = konsolide_df.apply(satir_isleyici, axis=1)
 
         # Geçmiş Veri Kaydı
