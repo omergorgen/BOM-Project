@@ -45,7 +45,7 @@ except ModuleNotFoundError as e:
 # YAPILANDIRMA & ARAYÜZ AYARLARI
 # ============================================================
 st.set_page_config(
-    page_title="CircuitBOM | BOM Intelligence (Çoklu API)",
+    page_title="CircuitBOM | BOM Intelligence",
     page_icon="bom_analiz_simge.ico",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -645,7 +645,6 @@ def api_verilerini_birlestir(mpn: str, zorla_yenile: bool = False) -> dict:
         if onbellek is not None:
             return onbellek
 
-    # Multithreading ile tüm API'lere aynı anda istek atılır (Hız Optimizasyonu)
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         f_mouser = executor.submit(mouser_istek_at, mpn)
         f_nexar = executor.submit(nexar_istek_at, mpn)
@@ -655,8 +654,9 @@ def api_verilerini_birlestir(mpn: str, zorla_yenile: bool = False) -> dict:
         r_nexar = f_nexar.result()
         r_ekom = f_ekom.result()
 
-    # Sonuçları Birleştir
     birlesik = _bos_parca_sonucu()
+    
+    # Genel Bilgiler (Açıklama / Üretici / Yaşam Döngüsü)
     if r_mouser.get("bulundu"):
         birlesik.update({
             "bulundu": True, "aciklama": r_mouser["aciklama"], "uretici": r_mouser["uretici"],
@@ -665,19 +665,41 @@ def api_verilerini_birlestir(mpn: str, zorla_yenile: bool = False) -> dict:
         })
     elif r_nexar.get("bulundu"):
         birlesik.update({"bulundu": True, "aciklama": r_nexar["aciklama"], "uretici": r_nexar["uretici"]})
+    elif r_ekom.get("bulundu"):
+        birlesik.update({"bulundu": True, "aciklama": r_ekom["aciklama"], "uretici": r_ekom["uretici"]})
 
-    # Teklifleri topla (Duplicate'leri engelle)
-    tum_teklifler = r_mouser.get("teklifler", []) + r_nexar.get("teklifler", []) + r_ekom.get("teklifler", [])
-    birlesik["teklifler"] = tum_teklifler
-    
-    # Hata varsa ve hiçbir şey bulunamadıysa ilk hatayı göster
-    hatalar = [h for h in [r_mouser["hata"], r_nexar["hata"], r_ekom["hata"]] if h]
+    # Kaynak Bazlı Stok ve Fiyat Ayrıştırma Yardımcısı
+    def _kaynak_ozeti(teklif_listesi):
+        if not teklif_listesi:
+            return 0, "-"
+        stok = max([t[4] or 0 for t in teklif_listesi], default=0)
+        fiyatlar = [t[1] for t in teklif_listesi if t[1] is not None and t[1] > 0]
+        en_ucuz = min(fiyatlar) if fiyatlar else None
+        pb = teklif_listesi[0][2] if teklif_listesi else "USD"
+        fiyat_metin = f"{en_ucuz:.3f} {pb}" if en_ucuz is not None else "-"
+        return stok, fiyat_metin
+
+    m_stok, m_fiyat = _kaynak_ozeti(r_mouser.get("teklifler", []))
+    n_stok, n_fiyat = _kaynak_ozeti(r_nexar.get("teklifler", []))
+    e_stok, e_fiyat = _kaynak_ozeti(r_ekom.get("teklifler", []))
+
+    birlesik["mouser_stok"] = m_stok
+    birlesik["mouser_fiyat"] = m_fiyat
+    birlesik["nexar_stok"] = n_stok
+    birlesik["nexar_fiyat"] = n_fiyat
+    birlesik["ekom_stok"] = e_stok
+    birlesik["ekom_fiyat"] = e_fiyat
+
+    # Genel Karar Motoru İçin Tüm Teklifleri Birleştir
+    birlesik["teklifler"] = r_mouser.get("teklifler", []) + r_nexar.get("teklifler", []) + r_ekom.get("teklifler", [])
+
+    hatalar = [h for h in [r_mouser.get("hata"), r_nexar.get("hata"), r_ekom.get("hata")] if h]
     if not birlesik["bulundu"] and hatalar:
         birlesik["hata"] = " / ".join(hatalar)
 
     if not birlesik.get("hata"):
         _cache_e_yaz(mpn, birlesik)
-    
+
     return birlesik
 
 
