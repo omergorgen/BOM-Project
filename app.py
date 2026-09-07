@@ -22,6 +22,24 @@ import altair as alt
 # DIŞ MODÜL KONTROLLERİ (Hata yakalama ve Optimizasyon)
 # ============================================================
 
+import numpy as np
+
+def en_iyi_parcayi_bul(df_varyasyonlar):
+    df_temp = df_varyasyonlar.copy()
+    
+    # Fiyatı sayıya çevir, olmayanları sonsuz yap
+    df_temp['Fiyat_Num'] = df_temp['Birim Fiyat'].astype(str).str.replace(' USD', '').replace('-', np.nan)
+    df_temp['Fiyat_Num'] = pd.to_numeric(df_temp['Fiyat_Num'], errors='coerce').fillna(float('inf'))
+    
+    # Stoğu sayıya çevir
+    df_temp['Stok_Num'] = df_temp['Küresel Stok'].astype(str).str.replace(',', '').replace('-', '0')
+    df_temp['Stok_Num'] = pd.to_numeric(df_temp['Stok_Num'], errors='coerce').fillna(0)
+    
+    # Risk (Artan), Fiyat (Artan), Stok (Azalan) şeklinde sırala
+    df_sirali = df_temp.sort_values(by=['Risk Skoru', 'Fiyat_Num', 'Stok_Num'], ascending=[True, True, False])
+    
+    return df_sirali.iloc[0]
+
 try:
     from google import genai
     YENI_GENAI_KULLAN = True
@@ -340,34 +358,6 @@ _AGIRLIK_ETIKETLERI = {
     "teslim": "Teslimat Süresi Önceliği",
 }
 _AGIRLIK_SIRA = ["maliyet", "risk", "tedarik", "teslim"]
-
-
-def _agirlik_degisti(degisen: str):
-    mevcut = st.session_state.agirlik_degerleri
-    yeni_deger = float(st.session_state[f"slider_{degisen}"])
-    yeni_deger = min(max(yeni_deger, 0.0), 100.0)
-
-    diger_kriterler = [k for k in _AGIRLIK_SIRA if k != degisen]
-    diger_toplam_eski = sum(mevcut[k] for k in diger_kriterler)
-    kalan = max(100.0 - yeni_deger, 0.0)
-
-    mevcut[degisen] = yeni_deger
-    if diger_toplam_eski <= 0:
-        pay = kalan / len(diger_kriterler)
-        for k in diger_kriterler:
-            mevcut[k] = max(pay, 0.0)
-    else:
-        for k in diger_kriterler:
-            oran = mevcut[k] / diger_toplam_eski
-            mevcut[k] = max(kalan * oran, 0.0)
-
-    yuvarlanmis = {k: round(v, 1) for k, v in mevcut.items()}
-    fark = round(100.0 - sum(yuvarlanmis.values()), 1)
-    yuvarlanmis[diger_kriterler[-1]] = round(max(yuvarlanmis[diger_kriterler[-1]] + fark, 0.0), 1)
-    st.session_state.agirlik_degerleri = yuvarlanmis
-
-    for k in _AGIRLIK_SIRA:
-        st.session_state[f"slider_{k}"] = yuvarlanmis[k]
 
 
 # ============================================================
@@ -1047,17 +1037,38 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("Karar Motoru Ağırlıkları")
-    st.caption("Toplam her zaman %100'e sabitlenir.")
-    for _k in _AGIRLIK_SIRA:
-        st.slider(
-            _AGIRLIK_ETIKETLERI[_k], 0.0, 100.0,
-            value=st.session_state.agirlik_degerleri[_k],
-            key=f"slider_{_k}", on_change=_agirlik_degisti, args=(_k,),
-            format="%.0f%%",
-        )
-    _toplam_agirlik = sum(st.session_state.agirlik_degerleri.values())
-    st.caption(f"Toplam: %{_toplam_agirlik:.0f}")
+    st.caption("Ağırlıkları ayarladıktan sonra 'Uygula' butonuna basın.")
 
+    # Slider'ların değerlerini geçici olarak tut
+    temp_agirliklar = {}
+    for _k in _AGIRLIK_SIRA:
+        temp_agirliklar[_k] = st.slider(
+            _AGIRLIK_ETIKETLERI[_k], 0.0, 100.0,
+            value=float(st.session_state.agirlik_degerleri[_k]),
+            step=1.0,
+            format="%.0f%%"
+        )
+        
+    _toplam_temp = sum(temp_agirliklar.values())
+
+    # Anlık toplam kontrolü ve uyarılar
+    if _toplam_temp > 100.0:
+        st.error(f"⚠️ Toplam %100'ü aşıyor! (Şu an: %{_toplam_temp:.0f})")
+    elif _toplam_temp < 100.0:
+        st.warning(f"⚠️ Toplam %100'den az! (Şu an: %{_toplam_temp:.0f})")
+    else:
+        st.success(f"✅ Toplam tam %100")
+
+    # Uygula Butonu
+    if st.button("Uygula", type="primary", use_container_width=True):
+        if _toplam_temp != 100.0:
+            st.error("Ağırlıkların toplamı tam %100 olmalıdır. Lütfen ayarlayın.")
+        else:
+            st.session_state.agirlik_degerleri = temp_agirliklar.copy()
+            st.success("Ağırlıklar başarıyla uygulandı!")
+            st.rerun()
+
+    # Sistemin kullanacağı gerçek ağırlıklar (sadece Uygula denildiğinde değişir)
     KARAR_AGIRLIKLARI = de.Agirliklar.normalize_et(
         st.session_state.agirlik_degerleri["maliyet"],
         st.session_state.agirlik_degerleri["risk"],
@@ -1317,7 +1328,36 @@ with tab3:
         else:
             for _, grup in konsolidasyon_adaylari.groupby("_normalize"):
                 with st.expander(f"{grup.iloc[0]['Description']} ({len(grup)} Varyasyon)"):
-                    grup_sirali = grup.copy().sort_values(by=["Risk Skoru"])
+                    grup_temp = grup.copy()
+                    
+                    # 1. Veri Temizleme
+                    grup_temp['Fiyat_Num'] = pd.to_numeric(grup_temp['Birim Fiyat'].astype(str).str.replace(' USD', ''), errors='coerce').fillna(float('inf'))
+                    grup_temp['Stok_Num'] = pd.to_numeric(grup_temp['Küresel Stok'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                    grup_temp['Risk_Num'] = pd.to_numeric(grup_temp['Risk Skoru'], errors='coerce').fillna(100)
+
+                    # 2. Maksimum ve Minimum Değerler
+                    max_fiyat = grup_temp['Fiyat_Num'].replace(float('inf'), np.nan).max()
+                    min_fiyat = grup_temp['Fiyat_Num'].min()
+                    max_stok = grup_temp['Stok_Num'].max()
+                    
+                    # 3. Puanlama (Her metrik 0-100 arası başarı puanına dönüştürülüyor)
+                    grup_temp['Puan_Risk'] = 100 - grup_temp['Risk_Num'] 
+                    grup_temp['Puan_Stok'] = 100 * (grup_temp['Stok_Num'] / max_stok) if max_stok > 0 else 0
+                    
+                    if pd.isna(max_fiyat) or max_fiyat == min_fiyat:
+                        grup_temp['Puan_Fiyat'] = 100.0
+                    else:
+                        grup_temp['Puan_Fiyat'] = 100 * (max_fiyat - grup_temp['Fiyat_Num']) / (max_fiyat - min_fiyat)
+                        grup_temp['Puan_Fiyat'] = grup_temp['Puan_Fiyat'].fillna(0)
+
+                    # 4. Session State'ten Dinamik Ağırlıkları Çekme
+                    w_maliyet = st.session_state.agirlik_degerleri.get("maliyet", 0) / 100.0
+                    w_risk = st.session_state.agirlik_degerleri.get("risk", 0) / 100.0
+                    w_stok = st.session_state.agirlik_degerleri.get("tedarik", 0) / 100.0
+                    
+                    # 5. Nihai Karar Skoru ve Sıralama (Ağırlıklı Toplam Model)
+                    grup_temp['Nihai_Skor'] = (grup_temp['Puan_Fiyat'] * w_maliyet) + (grup_temp['Puan_Risk'] * w_risk) + (grup_temp['Puan_Stok'] * w_stok)
+                    grup_sirali = grup_temp.sort_values(by='Nihai_Skor', ascending=False)
                     st.dataframe(grup[["MPN", "Manufacturer", "Birim Fiyat", "Küresel Stok", "Risk Skoru"]], use_container_width=True)
                     st.success(f"**Sistem Önerisi:** Tüm alımları **{grup_sirali.iloc[0]['MPN']}** üzerinden yapın.")
 
@@ -1745,11 +1785,11 @@ with tab6:
 
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown(" İç Bünyede Üretim ")
+                st.markdown("** İç Bünyede Üretim**")
                 ic_sabit = st.number_input("Sabit Kurulum/Ekipman Maliyeti (USD)", min_value=0.0, value=2000.0, step=100.0)
                 ic_birim = st.number_input("Birim Başına İşçilik+Genel Gider (USD)", min_value=0.0, value=4.5, step=0.1)
             with c2:
-                st.markdown(" Sözleşmeli Üretim (EMS) ")
+                st.markdown("** Sözleşmeli Üretim (EMS)**")
                 dis_sabit = st.number_input("Kurulum/NRE Ücreti (USD)", min_value=0.0, value=500.0, step=100.0)
                 dis_birim = st.number_input("Birim Başına Montaj Maliyeti (USD)", min_value=0.0, value=6.0, step=0.1)
 
