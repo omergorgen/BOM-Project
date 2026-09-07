@@ -45,8 +45,8 @@ except ModuleNotFoundError as e:
 # YAPILANDIRMA & ARAYÜZ AYARLARI
 # ============================================================
 st.set_page_config(
-    page_title="CircuitBOM | BOM Intelligence",
-    page_icon="bom_analiz_simge.ico",
+    page_title="EHSIM | BOM | DSS",
+    page_icon="tempImageBbzKm6.ico",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -73,16 +73,18 @@ def secret_veya_env(anahtar: str) -> str:
     return os.environ.get(anahtar, "")
 
 
+
 # ============================================================
 # GÜVENLİ API KEY YÖNETİMİ & SESSION STATE
 # ============================================================
-GEMINI_API_KEY = secret_veya_env("GEMINI_API_KEY")
 GEMINI_MODEL_NAME = "gemini-3.6-flash"  # Yapay zeka modeli sabit bırakıldı
 
-# API Key Session Tanımlamaları
-for api in ["mouser_api_key", "ekom_api_key", "nexar_client_id", "nexar_client_secret"]:
+# API Key Session Tanımlamaları (Gemini dahil edildi)
+for api in ["mouser_api_key", "ekom_api_key", "nexar_client_id", "nexar_client_secret", "gemini_api_key"]:
     if api not in st.session_state:
         st.session_state[api] = secret_veya_env(api.upper())
+
+GEMINI_API_KEY = st.session_state.gemini_api_key
 
 REQUIRED_COLUMNS = ["MPN", "Description", "Qty", "RefDes"]
 MANUEL_TEKLIF_KOLONLARI = ["MPN", "Tedarikçi", "Fiyat", "Para Birimi", "MOQ", "Stok", "Teslim Süresi (gün)", "Not"]
@@ -921,10 +923,11 @@ def ai_yanit_getir(prompt: str, api_key: str, model_name: str) -> str:
 # ============================================================
 # ARAYÜZ (UI)
 # ============================================================
-st.title("CircuitBOM | Çoklu API BOM Intelligence")
-st.markdown("BOM verilerinizi **Mouser, Ekom ve Nexar API** üzerinden zenginleştirin, riskleri analiz edin ve AI ile içgörüler oluşturun.")
+st.title("EHSIM | BOM | DSS")
+
 
 # YAN MENÜ
+
 with st.sidebar:
     st.header("⚙️ Proje Ayarları")
     yuklenen_dosya = st.file_uploader("BOM Dosyası Yükle", type=["csv", "xlsx"])
@@ -933,6 +936,12 @@ with st.sidebar:
     st.markdown("---")
     st.header("🔑 API Anahtarları")
     
+    # GEMINI (Yapay Zeka Asistanı)
+    gemini_girdi = st.text_input("Gemini API Key (AI Asistan)", value=st.session_state.gemini_api_key, type="password")
+    if gemini_girdi != st.session_state.gemini_api_key:
+        st.session_state.gemini_api_key = gemini_girdi
+        GEMINI_API_KEY = gemini_girdi  # Global değişkeni anında güncelle
+        
     # MOUSER
     mouser_anahtar = st.text_input("Mouser API Key", value=st.session_state.mouser_api_key, type="password")
     if mouser_anahtar != st.session_state.mouser_api_key:
@@ -1491,14 +1500,11 @@ def _karar_ozeti_hesapla(df: "pd.DataFrame", api_map: dict, agirlik: "de.Agirlik
 # ... Decision Engine orijinal kodu
 with tab6:
     if konsolide_df is not None:
-        st.markdown(
-            "Mevcut risk, fiyat, stok, **MOQ** ve **teslim süresi** verilerini **tek bir ağırlıklı karar "
-            "skoruna** dönüştürür. Ağırlıkları sol menüden ayarlayabilirsiniz (toplam her zaman %100)."
-        )
+        
         alt_sekme0, alt_sekme1, alt_sekme2, alt_sekme3, alt_sekme4, alt_sekme5, alt_sekme6, alt_sekme7 = st.tabs([
-            "🛠️ Manuel Veri Düzeltme", "🎯 Tedarikçi / Parça Seçimi", "💵 Maliyet Optimizasyonu",
-            "🏭 Yap ya da Satın Al", "📋 Manuel Tedarikçi Teklifleri", "🔗 Tedarikçi Konsolidasyonu",
-            "🗂️ Senaryolar", "📄 Denetim, Proje & Rapor"
+            " Manuel Veri Düzeltme", " Tedarikçi / Parça Seçimi", " Maliyet Optimizasyonu",
+            " Yap ya da Satın Al", " Manuel Tedarikçi Teklifleri", " Tedarikçi Konsolidasyonu",
+            " Senaryolar", " Denetim, Proje & Rapor"
         ])
 
         # --- 6.0 MANUEL VERİ DÜZELTME -----
