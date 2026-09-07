@@ -33,7 +33,7 @@ try:
     import decision_engine as de
 except ModuleNotFoundError as e:
     st.set_page_config(page_title="Modül Hatası", layout="centered")
-    st.error(f"🚨 `decision_engine.py` dosyası veya içindeki bir modül bulunamadı! Hata: {e}")
+    st.error(f" `decision_engine.py` dosyası veya içindeki bir modül bulunamadı! Hata: {e}")
     st.warning(
         "Lütfen `decision_engine.py` dosyasını `app.py` ile **AYNI KLASÖRE** kaydettiğinizden emin olun.\n\n"
         f"Uygulamanın şu an baktığı klasör: `{os.getcwd()}`"
@@ -52,14 +52,85 @@ st.set_page_config(
 )
 
 st.markdown("""
-    <style>
+<style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    .block-container {padding-top: 2rem;}
-    .stTabs [data-baseweb="tab-list"] {gap: 24px;}
-    .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: transparent; border-radius: 4px; padding-top: 10px; padding-bottom: 10px;}
-    .stTabs [aria-selected="true"] {background-color: rgba(28, 131, 225, 0.1) !important;}
-    </style>
+    .block-container {padding-top: 2rem; padding-bottom: 3rem;}
+
+    /* --- Sekmeler: pill/chip görünümü --- */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 44px;
+        white-space: pre-wrap;
+        background-color: rgba(255,255,255,0.03);
+        border-radius: 8px;
+        padding: 0 16px;
+        border: 1px solid transparent;
+        transition: all 0.15s ease;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: rgba(91, 141, 239, 0.12);
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: rgba(91, 141, 239, 0.18) !important;
+        border: 1px solid rgba(91, 141, 239, 0.4) !important;
+        font-weight: 600;
+    }
+
+    /* --- Metric kartları --- */
+    div[data-testid="stMetric"] {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 12px;
+        padding: 16px 18px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    }
+    div[data-testid="stMetric"] label {
+        color: #9CA3AF !important;
+        font-size: 0.8rem !important;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+
+    /* --- Butonlar --- */
+    .stButton > button, .stDownloadButton > button {
+        border-radius: 8px;
+        border: 1px solid rgba(91, 141, 239, 0.4);
+        background: linear-gradient(180deg, rgba(91,141,239,0.15), rgba(91,141,239,0.05));
+        transition: all 0.15s ease;
+        font-weight: 500;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        border-color: #5B8DEF;
+        background: rgba(91,141,239,0.25);
+        transform: translateY(-1px);
+    }
+
+    /* --- Dosya yükleyici --- */
+    [data-testid="stFileUploaderDropzone"] {
+        border-radius: 12px;
+        border: 1.5px dashed rgba(91,141,239,0.4) !important;
+        background: rgba(91,141,239,0.04);
+    }
+
+    /* --- Sidebar başlıkları --- */
+    section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
+        font-size: 1rem;
+        color: #E6E6E6;
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+        padding-bottom: 6px;
+    }
+
+    /* --- Dataframe --- */
+    div[data-testid="stDataFrame"] {
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid rgba(255,255,255,0.08);
+    }
+</style>
 """, unsafe_allow_html=True)
 
 
@@ -77,7 +148,7 @@ def secret_veya_env(anahtar: str) -> str:
 # ============================================================
 # GÜVENLİ API KEY YÖNETİMİ & SESSION STATE
 # ============================================================
-GEMINI_MODEL_NAME = "gemini-3.6-flash"  # Yapay zeka modeli sabit bırakıldı
+GEMINI_MODEL_NAME = "gemini-3.6-flash"# Yapay zeka modeli sabit bırakıldı
 
 # API Key Session Tanımlamaları (Gemini dahil edildi)
 for api in ["mouser_api_key", "ekom_api_key", "nexar_client_id", "nexar_client_secret", "gemini_api_key"]:
@@ -120,7 +191,7 @@ GECMIS_VERI_KOLONLARI = ["Zaman", "MPN", "Description", "Risk Skoru", "Birim Fiy
 GECMIS_VERI_MAX_SATIR = 50000 
 
 API_CACHE_DB_YOLU = os.path.join(VERI_DIZINI, "unified_api_cache.db")
-API_CACHE_TTL_SANIYE = 24 * 3600  
+API_CACHE_TTL_SANIYE = 24 * 3600 
 
 # Hız optimizasyonu için Session Objesi (Bağlantı havuzu yeniden kullanılır)
 GLOBAL_REQ_SESSION = requests.Session()
@@ -173,14 +244,14 @@ def _hucre_stili(val):
         return "background-color: rgba(255, 164, 33, 0.2); color: #ffa421;"
     return "background-color: rgba(33, 195, 84, 0.2); color: #21c354;"
 
-
 def _yasam_stili(val):
+    stil_taban = "border-radius: 6px; padding: 2px 8px; font-weight: 600; text-align: center;"
     if val in ("Obsolete", "EOL", "Not Recommended for New Design"):
-        return "background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; font-weight: bold;"
+        return f"background-color: rgba(255,75,75,0.15); color: #ff6b6b; {stil_taban}"
     if val == "NRND":
-        return "background-color: rgba(255, 164, 33, 0.2); color: #ffa421;"
+        return f"background-color: rgba(255,164,33,0.15); color: #ffb84d; {stil_taban}"
     if val in ("Aktif", "Active"):
-        return "background-color: rgba(33, 195, 84, 0.2); color: #21c354;"
+        return f"background-color: rgba(33,195,84,0.15); color: #4ade80; {stil_taban}"
     return ""
 
 
@@ -263,10 +334,10 @@ if "agirlik_degerleri" not in st.session_state:
     st.session_state.agirlik_degerleri = {"maliyet": 30.0, "risk": 25.0, "tedarik": 25.0, "teslim": 20.0}
 
 _AGIRLIK_ETIKETLERI = {
-    "maliyet": "💰 Maliyet Önceliği",
-    "risk": "⚠️ Risk/Arz Güvenliği Önceliği",
-    "tedarik": "📦 Tedarik/Stok Önceliği (MOQ dahil)",
-    "teslim": "🚚 Teslimat Süresi Önceliği",
+    "maliyet": "Maliyet Önceliği",
+    "risk": "Risk/Arz Güvenliği Önceliği",
+    "tedarik": "Tedarik/Stok Önceliği (MOQ dahil)",
+    "teslim": "Teslimat Süresi Önceliği",
 }
 _AGIRLIK_SIRA = ["maliyet", "risk", "tedarik", "teslim"]
 
@@ -782,10 +853,10 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int, override: dict 
 
     if sonuc.get("hata"):
         temel = {"risk": 50, "karsilama": 0, "toplam_stok": 0, "uygun_tedarikci": None, "fiyat_metni": "-", "maliyet_metni": "-",
-                 "risk_bilesenleri": [f"⚪ API hatası ({sonuc['hata']}) nedeniyle veri alınamadı → varsayılan orta risk: 50"]}
+                 "risk_bilesenleri": [f"API hatası ({sonuc['hata']}) nedeniyle veri alınamadı → varsayılan orta risk: 50"]}
     elif not sonuc.get("bulundu"):
         temel = {"risk": 100, "karsilama": 0, "toplam_stok": 0, "uygun_tedarikci": None, "fiyat_metni": "-", "maliyet_metni": "-",
-                 "risk_bilesenleri": ["🔴 Parça API veritabanında bulunamadı → en yüksek risk: 100"]}
+                 "risk_bilesenleri": ["Parça API veritabanında bulunamadı → en yüksek risk: 100"]}
     else:
         yasam = sonuc.get("yasam_durumu_kategori", "Bilinmiyor")
         teklifler = sonuc.get("teklifler", [])
@@ -815,26 +886,26 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int, override: dict 
         bilesenler = []
         if yasam == "EOL":
             risk = 95
-            bilesenler.append("🔴 Yaşam Döngüsü: EOL (üretimi durmuş) → baz risk 95")
+            bilesenler.append("Yaşam Döngüsü: EOL (üretimi durmuş) → baz risk 95")
         elif not teklifler:
             risk = 90
-            bilesenler.append("🔴 Hiçbir tedarikçide teklif/stok bulunamadı → baz risk 90")
+            bilesenler.append("Hiçbir tedarikçide teklif/stok bulunamadı → baz risk 90")
         else:
             stoklu_tedarikci = sum(1 for t in teklifler if (t[4] or 0) > 0)
             if toplam_stok < gereken_miktar:
                 risk = int(60 + (1 - (toplam_stok / gereken_miktar)) * 35)
-                bilesenler.append(f"🟠 Küresel stok ihtiyacı karşılamıyor (karşılama: %{karsilama:.0f}) → baz risk {risk}")
+                bilesenler.append(f"Küresel stok ihtiyacı karşılamıyor (karşılama: %{karsilama:.0f}) → baz risk {risk}")
             else:
                 if stoklu_tedarikci == 1:
                     risk = 35
-                    bilesenler.append("🟡 Tek kaynak: sadece 1 teklif paketinde yeterli stok var → baz risk 35")
+                    bilesenler.append("Tek kaynak: sadece 1 teklif paketinde yeterli stok var → baz risk 35")
                 else:
                     risk = 10
-                    bilesenler.append(f"🟢 Yeterli hacim ve stok mevcut → baz risk 10")
+                    bilesenler.append(f"Yeterli hacim ve stok mevcut → baz risk 10")
             if yasam == "NRND":
                 onceki_risk = risk
                 risk = min(risk + 20, 89)
-                bilesenler.append(f"🟠 Yaşam Döngüsü: NRND (önerilmiyor) → +{risk - onceki_risk} puan eklendi")
+                bilesenler.append(f"Yaşam Döngüsü: NRND (önerilmiyor) → +{risk - onceki_risk} puan eklendi")
 
         # Yeterli stoğu olan teklifleri bul
         stok_uygun_teklifler = [t for t in teklifler if (t[4] or 0) >= gereken_miktar]
@@ -877,15 +948,15 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int, override: dict 
     if override.get("stok") is not None:
         temel["toplam_stok"] = override["stok"]
         temel["karsilama"] = min((override["stok"] / gereken_miktar * 100) if gereken_miktar > 0 else 0, 999)
-        temel["risk_bilesenleri"] = temel["risk_bilesenleri"] + [f"🛠️ Küresel stok manuel olarak {override['stok']:.0f} adete düzeltildi"]
+        temel["risk_bilesenleri"] = temel["risk_bilesenleri"] + [f"Küresel stok manuel olarak {override['stok']:.0f} adete düzeltildi"]
     if override.get("fiyat_usd") is not None:
         temel["fiyat_metni"] = f"{override['fiyat_usd']} USD"
         temel["maliyet_metni"] = f"{override['fiyat_usd'] * gereken_miktar:.2f} USD"
         if temel["uygun_tedarikci"] in (None, "Kritik (Tek Kaynak Yetersiz)"):
             temel["uygun_tedarikci"] = "Manuel Düzeltme"
-        temel["risk_bilesenleri"] = temel["risk_bilesenleri"] + [f"🛠️ Birim fiyat manuel olarak {override['fiyat_usd']} USD'ye düzeltildi"]
+        temel["risk_bilesenleri"] = temel["risk_bilesenleri"] + [f"Birim fiyat manuel olarak {override['fiyat_usd']} USD'ye düzeltildi"]
     if override.get("risk") is not None:
-        temel["risk_bilesenleri"] = temel["risk_bilesenleri"] + [f"🛠️ Risk skoru manuel olarak {temel['risk']} → {override['risk']:.0f} düzeltildi"]
+        temel["risk_bilesenleri"] = temel["risk_bilesenleri"] + [f"Risk skoru manuel olarak {temel['risk']} → {override['risk']:.0f} düzeltildi"]
         temel["risk"] = override["risk"]
 
     return temel
@@ -929,18 +1000,18 @@ st.title("EHSIM | BOM | DSS")
 # YAN MENÜ
 
 with st.sidebar:
-    st.header("⚙️ Proje Ayarları")
+    st.header("Proje Ayarları")
     yuklenen_dosya = st.file_uploader("BOM Dosyası Yükle", type=["csv", "xlsx"])
     uretim_adedi = st.number_input("Hedef Üretim Adedi:", min_value=1, value=100, step=1, key="uretim_adedi_input")
 
     st.markdown("---")
-    st.header("🔑 API Anahtarları")
+    st.header("API Anahtarları")
     
     # GEMINI (Yapay Zeka Asistanı)
     gemini_girdi = st.text_input("Gemini API Key (AI Asistan)", value=st.session_state.gemini_api_key, type="password")
     if gemini_girdi != st.session_state.gemini_api_key:
         st.session_state.gemini_api_key = gemini_girdi
-        GEMINI_API_KEY = gemini_girdi  # Global değişkeni anında güncelle
+        GEMINI_API_KEY = gemini_girdi # Global değişkeni anında güncelle
         
     # MOUSER
     mouser_anahtar = st.text_input("Mouser API Key", value=st.session_state.mouser_api_key, type="password")
@@ -963,19 +1034,19 @@ with st.sidebar:
         st.warning("Verilerin çekilebilmesi için en az bir API Key girmelisiniz.")
 
     _cache_ist = cache_istatistik()
-    with st.expander(f"🗄️ Kalıcı API Önbelleği ({_cache_ist['adet']} parça kayıtlı)"):
+    with st.expander(f"Kalıcı API Önbelleği ({_cache_ist['adet']} parça kayıtlı)"):
         st.caption("Birleştirilmiş API yanıtları önbelleğe alınır. Hızlandırır ve limitlere takılmanızı engeller.")
-        zorla_yenile = st.checkbox("🔄 Zorla Yenile (önbelleği yok say)", value=False, key="zorla_yenile_checkbox")
-        if st.button("🗑️ Kalıcı Önbelleği Tamamen Temizle"):
+        zorla_yenile = st.checkbox("Zorla Yenile (önbelleği yok say)", value=False, key="zorla_yenile_checkbox")
+        if st.button("Kalıcı Önbelleği Tamamen Temizle"):
             cache_tamamini_temizle()
             st.success("API önbelleği temizlendi.")
             st.rerun()
 
     if not GEMINI_API_KEY:
-        st.info("💡 Gemini API anahtarı eksik. AI asistan devre dışı.")
+        st.info("Gemini API anahtarı eksik. AI asistan devre dışı.")
 
     st.markdown("---")
-    st.header("🧭 Karar Motoru Ağırlıkları")
+    st.header("Karar Motoru Ağırlıkları")
     st.caption("Toplam her zaman %100'e sabitlenir.")
     for _k in _AGIRLIK_SIRA:
         st.slider(
@@ -994,14 +1065,14 @@ with st.sidebar:
         st.session_state.agirlik_degerleri["teslim"],
     )
 
-    with st.expander("💬 Bu ağırlıklar ne anlama geliyor?"):
+    with st.expander("Bu ağırlıklar ne anlama geliyor?"):
         for _yorum in de.agirlik_yorumla(KARAR_AGIRLIKLARI):
             st.markdown(_yorum)
 
-    ESIK_FARK = st.slider("🔀 'Değiştirmeyi Değerlendirin' eşiği", 1.0, 30.0, 8.0, step=0.5, key="esik_fark_slider")
+    ESIK_FARK = st.slider(" 'Değiştirmeyi Değerlendirin' eşiği", 1.0, 30.0, 8.0, step=0.5, key="esik_fark_slider")
 
     st.markdown("---")
-    with st.expander("💱 Döviz Kurları"):
+    with st.expander("Döviz Kurları"):
         st.session_state.kur_tablosu["EUR"] = st.number_input("1 EUR = ? USD", min_value=0.0, value=float(st.session_state.kur_tablosu.get("EUR", 1.08)), step=0.01, key="kur_eur_input")
         st.session_state.kur_tablosu["TRY"] = st.number_input("1 TRY = ? USD", min_value=0.0, value=float(st.session_state.kur_tablosu.get("TRY", 0.030)), step=0.001, format="%.3f", key="kur_try_input")
         st.session_state.kur_tablosu["GBP"] = st.number_input("1 GBP = ? USD", min_value=0.0, value=float(st.session_state.kur_tablosu.get("GBP", 1.27)), step=0.01, key="kur_gbp_input")
@@ -1012,9 +1083,9 @@ konsolide_df = None
 api_sonuclar_map = {}
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📑 BOM Analiz Tablosu", "🔍 Detaylı Parça Analizi",
-    "🔄 Akıllı Konsolidasyon", "🤖 AI Asistan", "🔎 Manuel MPN Arama",
-    "🧭 Karar Destek Sistemi", "📈 Analitik & Geçmiş"
+    "BOM Analiz Tablosu", "Detaylı Parça Analizi",
+    "Akıllı Konsolidasyon", "AI Asistan", "Manuel MPN Arama",
+    "Karar Destek Sistemi", "Analitik & Geçmiş"
 ])
 
 if yuklenen_dosya:
@@ -1084,7 +1155,7 @@ if yuklenen_dosya:
                     t_list.sort(key=lambda x: x[3])
                     secilen = t_list[0]
                     
-                return f"{secilen[1]} {secilen[2]}" # Fiyat ve orijinal API para birimi
+                return f"{secilen[1]} {secilen[2]}"# Fiyat ve orijinal API para birimi
 
             def satir_isleyici(row):
                 mpn, birim_qty = row["MPN"], row["Qty"]
@@ -1158,7 +1229,7 @@ if yuklenen_dosya:
         ).sum()
         karsilanamayan = (konsolide_df["En Uygun Tedarikçi"] == "Kritik (Tek Kaynak Yetersiz)").sum()
 
-        st.markdown("### 📊 Genel Görünüm")
+        st.markdown("### Genel Görünüm")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Tahmini Maliyet (USD)", f"${toplam_usd:,.2f}")
         m2.metric("Benzersiz Parça", len(konsolide_df))
@@ -1178,7 +1249,7 @@ with tab1:
                                  .map(_tedarikci_stili, subset=["En Uygun Tedarikçi"])
         st.dataframe(stil, use_container_width=True, height=500)
         st.download_button(
-            "📥 Analizi Excel Olarak İndir",
+            "Analizi Excel Olarak İndir",
             data=excele_donustur(konsolide_df),
             file_name="CircuitBOM_bom_analizi.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1200,7 +1271,7 @@ with tab2:
             c2.metric("Yaşam Döngüsü", secili_satir['Yaşam Döngüsü'])
             c3.metric("Hesaplanan Risk Skoru", secili_satir['Risk Skoru'])
 
-            with st.expander("🔍 Bu risk skoru nasıl hesaplandı?"):
+            with st.expander("Bu risk skoru nasıl hesaplandı?"):
                 _override = override_al(secilen_mpn, st.session_state.manuel_override)
                 if _override:
                     st.warning("Bu parça için manuel düzeltme(ler) uygulanmış.")
@@ -1208,7 +1279,7 @@ with tab2:
                 for _bilesen in _metrik_detay.get("risk_bilesenleri", ["Bileşen bilgisi yok."]):
                     st.markdown(f"- {_bilesen}")
 
-            st.markdown("#### 🛒 Küresel Tedarikçi Teklifleri (Tüm API'ler)")
+            st.markdown("#### Küresel Tedarikçi Teklifleri (Tüm API'ler)")
             teklifler = sonuc.get("teklifler", [])
             if teklifler:
                 teklif_df = pd.DataFrame(teklifler, columns=["Tedarikçi", "Birim Fiyat", "Para Birimi", "Min. Sipariş (MOQ)", "Stok Adedi", "Link"])
@@ -1216,7 +1287,7 @@ with tab2:
             else:
                 st.warning("Bu parça için aktif teklif bulunamadı.")
 
-            st.markdown("#### 🔄 Zenginleştirilmiş Alternatifler")
+            st.markdown("#### Zenginleştirilmiş Alternatifler")
             alternatifler = sonuc.get("alternatifler", [])
             if alternatifler:
                 alt_veriler = []
@@ -1245,7 +1316,7 @@ with tab3:
             st.success("Optimize edilebilecek benzer parça bulunamadı.")
         else:
             for _, grup in konsolidasyon_adaylari.groupby("_normalize"):
-                with st.expander(f"📌 {grup.iloc[0]['Description']} ({len(grup)} Varyasyon)"):
+                with st.expander(f"{grup.iloc[0]['Description']} ({len(grup)} Varyasyon)"):
                     grup_sirali = grup.copy().sort_values(by=["Risk Skoru"])
                     st.dataframe(grup[["MPN", "Manufacturer", "Birim Fiyat", "Küresel Stok", "Risk Skoru"]], use_container_width=True)
                     st.success(f"**Sistem Önerisi:** Tüm alımları **{grup_sirali.iloc[0]['MPN']}** üzerinden yapın.")
@@ -1253,12 +1324,12 @@ with tab3:
 # SEKME 4: YAPAY ZEKA ASİSTANI
 with tab4:
     if konsolide_df is not None:
-        soru = st.text_input("💬 Asistana Sorun:", placeholder="Risk skoru 70'in üzerinde olan parçaları özetle.")
+        soru = st.text_input("Asistana Sorun:", placeholder="Risk skoru 70'in üzerinde olan parçaları özetle.")
         if soru:
             if not GEMINI_API_KEY:
-                st.error("🔑 Ayarlardan Gemini API Key girmelisiniz.")
+                st.error("Ayarlardan Gemini API Key girmelisiniz.")
             else:
-                with st.spinner("🤖 CircuitBOM AI analiz ediyor..."):
+                with st.spinner("CircuitBOM AI analiz ediyor..."):
                     try:
                         csv_metni = konsolide_df[["MPN", "Description", "İhtiyaç", "Küresel Stok", "Yaşam Döngüsü", "Risk Skoru", "Birim Fiyat"]].to_csv(index=False)
                         prompt = f"Sen tedarik zinciri AI asistanısın. Aşağıdaki BOM TABLOSU verisine dayanarak cevap ver.\nBOM VERİSİ:\n{csv_metni}\n\nSORU: {soru}"
@@ -1268,7 +1339,7 @@ with tab4:
 
 # SEKME 5: MANUEL MPN ARAMA
 with tab5:
-    st.markdown("### 🔍 Hızlı Parça Arama")
+    st.markdown("### Hızlı Parça Arama")
     manuel_girdi = st.text_input("MPN Girin (Virgülle ayırarak birden fazla girebilirsiniz):", placeholder="Örn: BC847, LM324, NE555")
     if st.button("Ara", type="primary") and manuel_girdi:
         aranacak_mpnler = [m.strip() for m in manuel_girdi.split(",") if m.strip()]
@@ -1501,10 +1572,13 @@ def _karar_ozeti_hesapla(df: "pd.DataFrame", api_map: dict, agirlik: "de.Agirlik
 with tab6:
     if konsolide_df is not None:
         
-        alt_sekme0, alt_sekme1, alt_sekme2, alt_sekme3, alt_sekme4, alt_sekme5, alt_sekme6, alt_sekme7 = st.tabs([
-            " Manuel Veri Düzeltme", " Tedarikçi / Parça Seçimi", " Maliyet Optimizasyonu",
-            " Yap ya da Satın Al", " Manuel Tedarikçi Teklifleri", " Tedarikçi Konsolidasyonu",
-            " Senaryolar", " Denetim, Proje & Rapor"
+        # Not: "with alt_sekmeN:" blokları aşağıda değişmedi (eski kod korunuyor).
+        # Sadece st.tabs()'e SIRAYLA hangi değişkenin verildiği değişti; böylece
+        # "Tedarikçi / Parça Seçimi" kullanıcıya İLK sekme olarak görünüyor.
+        alt_sekme1, alt_sekme0, alt_sekme2, alt_sekme3, alt_sekme4, alt_sekme5, alt_sekme6, alt_sekme7 = st.tabs([
+            "Tedarikçi / Parça Seçimi", "Manuel Veri Düzeltme", "Maliyet Optimizasyonu",
+            "Yap ya da Satın Al", "Manuel Tedarikçi Teklifleri", "Tedarikçi Konsolidasyonu",
+            "Senaryolar", "Denetim / Proje / Rapor"
         ])
 
         # --- 6.0 MANUEL VERİ DÜZELTME -----
@@ -1535,9 +1609,9 @@ with tab6:
         # --- 6.1 TEDARİKÇİ / PARÇA SEÇİMİ -----
         with alt_sekme1:
             st.caption(
-                f"Ağırlıklar → 💰 Maliyet: %{KARAR_AGIRLIKLARI.maliyet*100:.0f}  "
-                f"⚠️ Risk: %{KARAR_AGIRLIKLARI.risk*100:.0f}  📦 Tedarik: %{KARAR_AGIRLIKLARI.tedarik*100:.0f}  "
-                f"🚚 Teslim: %{KARAR_AGIRLIKLARI.teslim*100:.0f}  •  Değişim eşiği: {ESIK_FARK:.1f} puan"
+                f"Ağırlıklar → Maliyet: %{KARAR_AGIRLIKLARI.maliyet*100:.0f} "
+                f"Risk: %{KARAR_AGIRLIKLARI.risk*100:.0f} Tedarik: %{KARAR_AGIRLIKLARI.tedarik*100:.0f} "
+                f"Teslim: %{KARAR_AGIRLIKLARI.teslim*100:.0f} • Değişim eşiği: {ESIK_FARK:.1f} puan"
             )
 
             gecerli_manuel_ana = st.session_state.manuel_teklifler.dropna(subset=["MPN", "Fiyat"])
@@ -1583,13 +1657,13 @@ with tab6:
             with pd.ExcelWriter(oneri_excel_bytes, engine="openpyxl") as writer:
                 oneri_df.to_excel(writer, sheet_name="Karar Onerileri", index=False)
             st.download_button(
-                "📥 Karar Önerilerini Excel'e Aktar", data=oneri_excel_bytes.getvalue(),
+                "Karar Önerilerini Excel'e Aktar", data=oneri_excel_bytes.getvalue(),
                 file_name="karar_onerileri.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
             st.markdown("---")
-            st.markdown("#### 🔬 Aday Detay Karşılaştırması")
+            st.markdown("#### Aday Detay Karşılaştırması")
             secilen_mpn6 = st.selectbox(
                 "Detayını görmek istediğiniz parçayı seçin:", konsolide_df["MPN"].tolist(), key="karar_secim"
             )
@@ -1622,7 +1696,7 @@ with tab6:
                     st.success(f"'{secilen_mpn6}' artık bu seçimle sabitlendi. Sonraki analizlerde API'ye tekrar sorulmayacak.")
                     st.rerun()
 
-            with st.expander("🔍 Mevcut parçanın risk skoru nasıl hesaplandı?"):
+            with st.expander("Mevcut parçanın risk skoru nasıl hesaplandı?"):
                 _mevcut_mouser_sonuc = api_sonuclar_map.get(secilen_mpn6, {})
                 _mevcut_gereken = int(secili_row["İhtiyaç"]) if secili_row["İhtiyaç"] else 1
                 _mevcut_override = override_al(secilen_mpn6, st.session_state.manuel_override)
@@ -1631,7 +1705,7 @@ with tab6:
                     st.markdown(f"- {_bilesen}")
 
             if (detay_sonuc.get("en_iyi") or {}).get("Aday") != (detay_sonuc.get("mevcut") or {}).get("Aday"):
-                st.markdown("##### 🔁 Bu Alternatife Geçişin Başabaş Noktası")
+                st.markdown("##### Bu Alternatife Geçişin Başabaş Noktası")
                 st.caption(
                     "Yeniden nitelendirme/mühendislik gibi tek seferlik bir geçiş maliyeti varsa, "
                     "kaç adet üretimde bu maliyetin 'geri ödeneceğini' hesaplar."
@@ -1648,17 +1722,17 @@ with tab6:
                 elif bep == 0:
                     st.success("Geçiş maliyeti girilmedi/0 → alternatif her adette daha ucuz, geçiş anında karlı.")
                 else:
-                    st.success(f"📍 Bu geçiş, **{bep:,} adet** üretimden sonra kendini amorti eder (birim fiyat farkı × adet ≥ geçiş maliyeti).")
+                    st.success(f"Bu geçiş, **{bep:,} adet** üretimden sonra kendini amorti eder (birim fiyat farkı × adet ≥ geçiş maliyeti).")
 
         # --- 6.2 MALİYET OPTİMİZASYONU -----
         with alt_sekme2:
             ozet = de.maliyet_optimizasyon_ozeti(konsolide_df)
             m1, m2, m3 = st.columns(3)
-            m1.metric("💵 Konsolidasyon ile Potansiyel Tasarruf", f"${ozet['toplam_tasarruf']:,.2f}")
-            m2.metric("🚨 Tek Kaynak / Kritik Parça", ozet["kritik_parca_sayisi"], delta_color="inverse")
-            m3.metric("⚠️ Yüksek Riskli Parçaların Maliyeti", f"${ozet['yuksek_riskli_maliyet']:,.2f}", delta_color="inverse")
+            m1.metric("Konsolidasyon ile Potansiyel Tasarruf", f"${ozet['toplam_tasarruf']:,.2f}")
+            m2.metric("Tek Kaynak / Kritik Parça", ozet["kritik_parca_sayisi"], delta_color="inverse")
+            m3.metric("Yüksek Riskli Parçaların Maliyeti", f"${ozet['yuksek_riskli_maliyet']:,.2f}", delta_color="inverse")
 
-            st.markdown("#### 📌 Konsolidasyon Fırsatları")
+            st.markdown("#### Konsolidasyon Fırsatları")
             if ozet["konsolidasyon_firsatlari"]:
                 st.dataframe(pd.DataFrame(ozet["konsolidasyon_firsatlari"]), use_container_width=True)
             else:
@@ -1671,11 +1745,11 @@ with tab6:
 
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("**🏭 İç Bünyede Üretim**")
+                st.markdown(" İç Bünyede Üretim ")
                 ic_sabit = st.number_input("Sabit Kurulum/Ekipman Maliyeti (USD)", min_value=0.0, value=2000.0, step=100.0)
                 ic_birim = st.number_input("Birim Başına İşçilik+Genel Gider (USD)", min_value=0.0, value=4.5, step=0.1)
             with c2:
-                st.markdown("**🤝 Sözleşmeli Üretim (EMS)**")
+                st.markdown(" Sözleşmeli Üretim (EMS) ")
                 dis_sabit = st.number_input("Kurulum/NRE Ücreti (USD)", min_value=0.0, value=500.0, step=100.0)
                 dis_birim = st.number_input("Birim Başına Montaj Maliyeti (USD)", min_value=0.0, value=6.0, step=0.1)
 
@@ -1687,7 +1761,7 @@ with tab6:
             r3.metric("Fark", f"${sonuc_mvb['fark']:,.2f}")
             st.success(sonuc_mvb["oneri"])
             if sonuc_mvb["breakeven_adet"]:
-                st.info(f"📍 Başabaş noktası: **{sonuc_mvb['breakeven_adet']:,} adet**. Bu hacmin altında/üstünde öneri değişebilir.")
+                st.info(f"Başabaş noktası: **{sonuc_mvb['breakeven_adet']:,} adet**. Bu hacmin altında/üstünde öneri değişebilir.")
 
             egri = de.yap_sat_al_egri_verisi(
                 ic_sabit, ic_birim, dis_sabit, dis_birim, max(uretim_adedi * 3, 100)
@@ -1700,7 +1774,7 @@ with tab6:
             st.line_chart(egri_df)
 
             st.markdown("---")
-            st.markdown("#### 📊 Duyarlılık Analizi (Tornado)")
+            st.markdown("#### Duyarlılık Analizi (Tornado)")
             st.caption(
                 "Girdilerdeki belirsizliğe karşı başabaş noktasının ne kadar oynadığını gösterir. "
                 "Hangi varsayımın kararı en çok etkilediğini görmenizi sağlar."
@@ -1725,14 +1799,14 @@ with tab6:
 
             c_sablon, c_yukle = st.columns(2)
             with c_sablon:
-                st.markdown("**1️⃣ Şablonu indir (opsiyonel)**")
+                st.markdown("**1 Şablonu indir (opsiyonel)**")
                 sablon_bytes = pd.DataFrame(columns=MANUEL_TEKLIF_KOLONLARI).to_csv(index=False).encode("utf-8")
                 st.download_button(
-                    "📥 Boş Teklif Şablonu (CSV) İndir", data=sablon_bytes,
+                    "Boş Teklif Şablonu (CSV) İndir", data=sablon_bytes,
                     file_name="manuel_teklif_sablonu.csv", mime="text/csv"
                 )
             with c_yukle:
-                st.markdown("**2️⃣ Toplu yükle (opsiyonel)**")
+                st.markdown("**2 Toplu yükle (opsiyonel)**")
                 teklif_dosya = st.file_uploader(
                     "Doldurduğun şablonu yükle:", type=["csv", "xlsx"], key="manuel_teklif_yukleme"
                 )
@@ -1764,8 +1838,8 @@ with tab6:
                     except Exception as e:
                         st.error(f"Dosya okunamadı: {e}")
 
-            st.markdown("**3️⃣ Elle gir / düzenle / sil**")
-            st.caption("Tabloya doğrudan satır ekleyebilir, mevcut satırları düzenleyebilir veya silebilirsin (sağdaki 🗑️ ile).")
+            st.markdown("**3 Elle gir / düzenle / sil**")
+            st.caption("Tabloya doğrudan satır ekleyebilir, mevcut satırları düzenleyebilir veya silebilirsin (sağdaki ile).")
             duzenlenmis_df = st.data_editor(
                 st.session_state.manuel_teklifler,
                 num_rows="dynamic", use_container_width=True, key="manuel_teklif_editor",
@@ -1783,10 +1857,10 @@ with tab6:
             st.session_state.manuel_teklifler = duzenlenmis_df
 
             st.markdown("---")
-            st.markdown("#### ⚖️ Karşılaştırma")
+            st.markdown("#### Karşılaştırma")
             st.caption(
                 f"Fiyatlar karşılaştırma öncesi ortak birime (USD) çevrilir. "
-                f"Kurlar sol menüdeki '💱 Döviz Kurları' bölümünden ayarlanabilir."
+                f"Kurlar sol menüdeki 'Döviz Kurları' bölümünden ayarlanabilir."
             )
             gecerli_manuel = st.session_state.manuel_teklifler.dropna(subset=["MPN", "Fiyat"])
             if gecerli_manuel.empty:
@@ -1811,7 +1885,7 @@ with tab6:
                     with pd.ExcelWriter(manuel_excel_bytes, engine="openpyxl") as writer:
                         pd.DataFrame(manuel_sonuc["detay"]).to_excel(writer, sheet_name="Teklif Karsilastirma", index=False)
                     st.download_button(
-                        "📥 Bu Karşılaştırmayı Excel'e Aktar", data=manuel_excel_bytes.getvalue(),
+                        "Bu Karşılaştırmayı Excel'e Aktar", data=manuel_excel_bytes.getvalue(),
                         file_name=f"teklif_karsilastirma_{secilen_mpn_manuel}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="manuel_export_btn"
@@ -1827,7 +1901,7 @@ with tab6:
             gecerli_manuel_konsolide = st.session_state.manuel_teklifler.dropna(subset=["MPN", "Fiyat", "Tedarikçi"])
             if gecerli_manuel_konsolide.empty:
                 st.info(
-                    "Bu analiz için önce '📋 Manuel Tedarikçi Teklifleri' sekmesinden en az birkaç parçaya "
+                    "Bu analiz için önce 'Manuel Tedarikçi Teklifleri' sekmesinden en az birkaç parçaya "
                     "teklif girmelisin — özellikle AYNI tedarikçinin birden fazla parçaya teklif vermesi gerekir."
                 )
             else:
@@ -1862,7 +1936,7 @@ with tab6:
                 if not konsolidasyon_df.empty:
                     en_iyi = konsolidasyon_df.iloc[0]
                     st.success(
-                        f"🏆 En geniş kapsamlı tedarikçi: **{en_iyi['Tedarikçi']}** — BOM'un "
+                        f"En geniş kapsamlı tedarikçi: **{en_iyi['Tedarikçi']}** — BOM'un "
                         f"**{en_iyi['BOM Kapsama Oranı']}**'ünü ({en_iyi['Kapsadığı Parça Sayısı']} / {toplam_parca_sayisi} parça) "
                         f"tek başına karşılayabiliyor."
                     )
@@ -1872,7 +1946,7 @@ with tab6:
                         st.caption(f"Kapsamadığı {len(eksik_mpnler)} parça için başka kaynak (API/diğer tedarikçi) gerekecek: {_gosterilecek}")
 
                 st.markdown("---")
-                st.markdown("#### 🔗 Bu Tercihi Karar Motoruna Bağla")
+                st.markdown("#### Bu Tercihi Karar Motoruna Bağla")
                 st.caption(
                     "Bir tedarikçiyi 'öncelikli' seçtiğinde, o tedarikçinin teklif verdiği HER parçanın karar "
                     "skoruna bir bonus eklenir. Böylece 'bu parçada C tedarikçisini seçtim' kararı, diğer tüm "
@@ -1899,7 +1973,7 @@ with tab6:
                         st.session_state["_karar_aday_onbellegi"] = {}
                     st.session_state.konsolidasyon_bonus = _yeni_bonus
                     st.info(
-                        f"✅ '{secili_tercih}' artık '🎯 Tedarikçi / Parça Seçimi' ve '📋 Manuel Tedarikçi Teklifleri' "
+                        f"✅ '{secili_tercih}' artık 'Tedarikçi / Parça Seçimi' ve 'Manuel Tedarikçi Teklifleri' "
                         f"sekmelerindeki tüm hesaplamalarda +{st.session_state.konsolidasyon_bonus:.0f} puan avantajlı "
                         f"(detay tablolarındaki 'Konsolidasyon Bonusu' sütununda görünür)."
                     )
@@ -1916,7 +1990,7 @@ with tab6:
             )
             c1, c2 = st.columns([3, 1])
             senaryo_adi = c1.text_input("Senaryo Adı", placeholder="örn. Maliyet Öncelikli", key="senaryo_adi_input")
-            if c2.button("💾 Mevcut Ağırlıkları Kaydet", use_container_width=True):
+            if c2.button("Mevcut Ağırlıkları Kaydet", use_container_width=True):
                 if not senaryo_adi.strip():
                     st.warning("Lütfen bir senaryo adı girin.")
                 else:
@@ -1939,18 +2013,18 @@ with tab6:
 
             if st.session_state.senaryolar:
                 st.markdown("---")
-                st.markdown("#### 📊 Senaryo Kıyaslaması")
+                st.markdown("#### Senaryo Kıyaslaması")
                 karsilastirma_satirlari = []
                 for isim, veri in st.session_state.senaryolar.items():
                     ag = veri["agirlik"]
                     ozet = veri["ozet"]
                     karsilastirma_satirlari.append({
                         "Senaryo": isim,
-                        "💰 Maliyet %": f"{ag['maliyet']:.0f}", "⚠️ Risk %": f"{ag['risk']:.0f}",
-                        "📦 Tedarik %": f"{ag['tedarik']:.0f}", "🚚 Teslim %": f"{ag['teslim']:.0f}",
+                        "Maliyet %": f"{ag['maliyet']:.0f}", "Risk %": f"{ag['risk']:.0f}",
+                        "Tedarik %": f"{ag['tedarik']:.0f}", "Teslim %": f"{ag['teslim']:.0f}",
                         "Eşik": veri["esik_fark"],
-                        "✅ Koru": ozet["koru"], "🔄 Değiştir": ozet["degistir"],
-                        "⚠️ Zorunlu": ozet["zorunlu"], "🛑 Kritik": ozet["kritik"],
+                        "✅ Koru": ozet["koru"], "Değiştir": ozet["degistir"],
+                        "Zorunlu": ozet["zorunlu"], "Kritik": ozet["kritik"],
                         "Ort. Skor İyileşmesi": ozet["ortalama_skor_iyilesmesi"],
                     })
                 karsilastirma_df = pd.DataFrame(karsilastirma_satirlari)
@@ -1959,7 +2033,7 @@ with tab6:
                 silinecek = st.multiselect(
                     "Silinecek senaryo(lar):", list(st.session_state.senaryolar.keys()), key="senaryo_sil_secim"
                 )
-                if st.button("🗑️ Seçilenleri Sil") and silinecek:
+                if st.button("Seçilenleri Sil") and silinecek:
                     for s in silinecek:
                         st.session_state.senaryolar.pop(s, None)
                     st.rerun()
@@ -1968,19 +2042,19 @@ with tab6:
 
         # --- 6.7 DENETİM İZİ, PROJE KAYDET/YÜKLE & RAPOR -----
         with alt_sekme7:
-            st.markdown("#### 📜 Denetim İzi (Audit Trail)")
+            st.markdown("#### Denetim İzi (Audit Trail)")
             st.caption("Manuel veri düzeltmeleri ve kaydedilen senaryolar otomatik olarak burada loglanır.")
             if st.session_state.denetim_kayitlari:
                 denetim_df = pd.DataFrame(st.session_state.denetim_kayitlari).iloc[::-1]
                 st.dataframe(denetim_df, use_container_width=True, height=250)
-                if st.button("🗑️ Denetim İzini Temizle"):
+                if st.button("Denetim İzini Temizle"):
                     st.session_state.denetim_kayitlari = []
                     st.rerun()
             else:
                 st.info("Henüz bir denetim kaydı yok.")
 
             st.markdown("---")
-            st.markdown("#### 💾 Projeyi Kaydet / Yükle")
+            st.markdown("#### Projeyi Kaydet / Yükle")
             st.caption(
                 "Ağırlıklar, eşik değeri, döviz kurları, manuel teklifler, manuel düzeltmeler ve senaryoları "
                 "tek bir dosyada saklar; başka bir oturumda veya başka bir bilgisayarda kaldığın yerden devam edebilirsin."
@@ -1998,12 +2072,12 @@ with tab6:
                 }
                 proje_json = json.dumps(proje_verisi, ensure_ascii=False, indent=2, default=str)
                 st.download_button(
-                    "📥 Projeyi Kaydet (.json)", data=proje_json.encode("utf-8"),
+                    "Projeyi Kaydet (.json)", data=proje_json.encode("utf-8"),
                     file_name="circuitbom_proje.json", mime="application/json", use_container_width=True
                 )
             with pc2:
                 proje_dosyasi = st.file_uploader("Proje dosyasını yükle (.json):", type=["json"], key="proje_yukleme")
-                if proje_dosyasi is not None and st.button("♻️ Projeyi Geri Yükle", use_container_width=True):
+                if proje_dosyasi is not None and st.button("Projeyi Geri Yükle", use_container_width=True):
                     try:
                         yuklenen_proje = json.loads(proje_dosyasi.read().decode("utf-8"))
 
@@ -2040,12 +2114,12 @@ with tab6:
                         st.error(f"Proje dosyası okunamadı: {e}")
 
             st.markdown("---")
-            st.markdown("#### 📄 Yönetim Özeti Raporu")
+            st.markdown("#### Yönetim Özeti Raporu")
             st.caption(
                 "Karar önerilerini, maliyet optimizasyon özetini ve yap-sat-al sonucunu tek sayfalık bir "
                 "HTML raporunda birleştirir. Tarayıcıda açıp 'Yazdır → PDF olarak kaydet' ile PDF'e çevirebilirsin."
             )
-            if st.button("📄 Yönetim Özeti Raporu Oluştur"):
+            if st.button("Yönetim Özeti Raporu Oluştur"):
                 _rapor_ozet = de.maliyet_optimizasyon_ozeti(konsolide_df)
                 _rapor_oneri_satirlari = []
                 for _, _rrow in konsolide_df.iterrows():
@@ -2087,20 +2161,20 @@ th {{ background-color: #1c83e1; color: white; }}
 <h1>CircuitBOM | Yönetim Özeti Raporu</h1>
 <p>Oluşturulma Tarihi: {html_lib.escape(pd.Timestamp.now().strftime("%d.%m.%Y %H:%M"))} &nbsp;|&nbsp; Hedef Üretim Adedi: {int(uretim_adedi)}</p>
 
-<h2>💵 Maliyet Optimizasyonu Özeti</h2>
+<h2> Maliyet Optimizasyonu Özeti</h2>
 <div class="metric-box"><div class="metric-label">Konsolidasyon ile Potansiyel Tasarruf</div><div class="metric-value">${_rapor_ozet['toplam_tasarruf']:,.2f}</div></div>
 <div class="metric-box"><div class="metric-label">Tek Kaynak / Kritik Parça</div><div class="metric-value">{_rapor_ozet['kritik_parca_sayisi']}</div></div>
 <div class="metric-box"><div class="metric-label">Yüksek Riskli Parçaların Maliyeti</div><div class="metric-value">${_rapor_ozet['yuksek_riskli_maliyet']:,.2f}</div></div>
 
-<h2>🎯 Karar Destek Önerileri ({len(_rapor_oneri_df)} parça)</h2>
+<h2> Karar Destek Önerileri ({len(_rapor_oneri_df)} parça)</h2>
 <table><tr><th>MPN</th><th>Açıklama</th><th>Öneri</th><th>En İyi Aday</th></tr>{_rapor_satir_html}</table>
 
-<h2>🧭 Kullanılan Ağırlıklar</h2>
-<p>💰 Maliyet: %{KARAR_AGIRLIKLARI.maliyet*100:.0f} &nbsp;|&nbsp; ⚠️ Risk: %{KARAR_AGIRLIKLARI.risk*100:.0f}
-&nbsp;|&nbsp; 📦 Tedarik: %{KARAR_AGIRLIKLARI.tedarik*100:.0f} &nbsp;|&nbsp; 🚚 Teslim: %{KARAR_AGIRLIKLARI.teslim*100:.0f}</p>
+<h2> Kullanılan Ağırlıklar</h2>
+<p> Maliyet: %{KARAR_AGIRLIKLARI.maliyet*100:.0f} &nbsp;|&nbsp; Risk: %{KARAR_AGIRLIKLARI.risk*100:.0f}
+&nbsp;|&nbsp; Tedarik: %{KARAR_AGIRLIKLARI.tedarik*100:.0f} &nbsp;|&nbsp; Teslim: %{KARAR_AGIRLIKLARI.teslim*100:.0f}</p>
 </body></html>"""
                 st.download_button(
-                    "📥 Raporu İndir (.html)", data=_rapor_html.encode("utf-8"),
+                    "Raporu İndir (.html)", data=_rapor_html.encode("utf-8"),
                     file_name="circuitbom_yonetim_ozeti.html", mime="text/html"
                 )
                 st.success("Rapor hazır. İndirip tarayıcıda açtıktan sonra 'Yazdır → PDF olarak kaydet' ile PDF'e dönüştürebilirsin.")
@@ -2113,7 +2187,7 @@ th {{ background-color: #1c83e1; color: white; }}
 # ============================================================
 with tab7:
     if konsolide_df is not None:
-        st.markdown("#### 🔥 Risk / Maliyet Haritası")
+        st.markdown("#### Risk / Maliyet Haritası")
         st.caption(
             "Her nokta bir parçayı temsil eder. Sağ-üst köşedeki (yüksek maliyet + yüksek risk) parçalar "
             "önceliklendirilmesi gereken kritik parçalardır. Kabarcık boyutu ihtiyaç adedini gösterir."
@@ -2139,7 +2213,7 @@ with tab7:
             st.warning(f"Risk haritası çizilemedi: {e}")
 
         st.markdown("---")
-        st.markdown("#### 📈 Tarihsel Trend")
+        st.markdown("#### Tarihsel Trend")
         st.caption(
             "BOM'u farklı zamanlarda analiz ettikçe (her çalıştırma yerel diske kaydedilir), burada bir "
             "parçanın fiyat/risk geçmişini izleyebilirsin."
@@ -2159,7 +2233,7 @@ with tab7:
                 st.line_chart(trend_chart_df)
             st.dataframe(mpn_gecmis, use_container_width=True, height=200)
 
-            if st.button("🗑️ Geçmiş Veri Kaydını Temizle"):
+            if st.button("Geçmiş Veri Kaydını Temizle"):
                 try:
                     os.remove(GECMIS_VERI_YOLU)
                     st.session_state.pop("_son_log_imzasi", None)
