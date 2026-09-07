@@ -362,15 +362,29 @@ def cache_istatistik() -> dict:
         return {"adet": 0, "ilk_cekim": None, "son_cekim": None}
 
 def yasam_durumu_kategorisi_belirle(ham_metin: str) -> str:
-    if not ham_metin or ham_metin == "-" or str(ham_metin).lower() == "none":
+    if not ham_metin or ham_metin == "-" or str(ham_metin).lower() in ("none", "null", "bilinmiyor", ""):
         return "Bilinmiyor"
-    metin = str(ham_metin).lower()
-    if any(x in metin for x in ["obsolete", "eol", "end of life", "discontinued", "not recommended for new design"]):
+    
+    metin = str(ham_metin).lower().strip()
+    
+    # EOL / Üretimi Durmuş Durumları
+    if any(x in metin for x in [
+        "obsolete", "eol", "end of life", "discontinued", "not recommended for new design",
+        "uretimden kalkti", "üretimden kalktı", "durduruldu", "last time buy", "ltb"
+    ]):
         return "EOL"
-    if any(x in metin for x in ["nrnd"]):
+    
+    # NRND / Yeni Tasarımlar İçin Önerilmeyen Durumlar
+    if any(x in metin for x in ["nrnd", "not recommended", "onerilmez", "önerilmez"]):
         return "NRND"
-    if any(x in metin for x in ["active", "production", "new"]):
+    
+    # Aktif / Seri Üretim Durumları
+    if any(x in metin for x in [
+        "active", "production", "new product", "new", "aktif", "preliminary", 
+        "full production", "in production", "seri uretim"
+    ]):
         return "Aktif"
+        
     return "Diğer"
 
 
@@ -436,7 +450,21 @@ def mouser_istek_at(mpn: str) -> dict:
             return _bos_parca_sonucu("Parça Bulunamadı")
 
         ilk_urun = urunler[0]
-        yasam_ham = ilk_urun.get("LifecycleStatus", "Bilinmiyor")
+        # Yaşam döngüsünü alternatif alanlardan da tara
+        yasam_ham = (
+            ilk_urun.get("LifecycleStatus") or 
+            ilk_urun.get("LifeCycleStatus") or 
+            ilk_urun.get("Lifecycle") or 
+            "Bilinmiyor"
+        )
+        
+        # Eğer hala boşsa veya Bilinmiyor ise ürün özellikleri (ProductAttributes) içinden ara
+        if yasam_ham == "Bilinmiyor" and "ProductAttributes" in ilk_urun:
+            for attr in ilk_urun.get("ProductAttributes", []):
+                attr_name = str(attr.get("AttributeName", "")).lower()
+                if "lifecycle" in attr_name or "status" in attr_name:
+                    yasam_ham = attr.get("AttributeValue", "Bilinmiyor")
+                    break
         
       # SADECE RAFTAKİ GERÇEK FİZİKİ STOK (Web sitesiyle birebir eşleşir)
         toplam_stok = 0
@@ -558,7 +586,7 @@ def nexar_istek_at(mpn: str) -> dict:
             name
             manufacturer { name }
             shortDescription
-            medianPrice1000 { price currency }
+            specs { attribute { name } value }
             sellers { company { name } offers { price inventoryLevel prices { price currency quantity } } }
           }
         }
@@ -584,13 +612,25 @@ def nexar_istek_at(mpn: str) -> dict:
                     price = price_break.get("price", 0.0)
                     currency = price_break.get("currency", "USD")
                     teklifler.append([f"{s_name} (Nexar)", price, currency, qty, stok, "-"])
+                    # Nexar specs içerisinden LifeCycle durumunu çek
+        nexar_yasam = "Bilinmiyor"
+        for s in part_info.get("specs", []):
+            attr_name = str(s.get("attribute", {}).get("name", "")).lower()
+            if "lifecycle" in attr_name or "status" in attr_name:
+                nexar_yasam = s.get("value", "Bilinmiyor")
+                break
 
         return {
             "bulundu": True, "aciklama": part_info.get("shortDescription", "-"),
             "uretici": part_info.get("manufacturer", {}).get("name", "-"),
-            "teklifler": teklifler, "yasam_durumu_ham": "Bilinmiyor",
-            "yasam_durumu_kategori": "Bilinmiyor", "alternatifler": [], "hata": None
+            "teklifler": teklifler, 
+            "yasam_durumu_ham": nexar_yasam,
+            "yasam_durumu_kategori": yasam_durumu_kategorisi_belirle(nexar_yasam), 
+            "alternatifler": [], "hata": None
         }
+
+    
+        
     except Exception as e:
         return _bos_parca_sonucu(f"Nexar Hatası: {str(e)[:40]}")
 
@@ -794,15 +834,38 @@ def parca_metriklerini_hesapla(sonuc: dict, gereken_miktar: int, override: dict 
                 risk = min(risk + 20, 89)
                 bilesenler.append(f"🟠 Yaşam Döngüsü: NRND (önerilmiyor) → +{risk - onceki_risk} puan eklendi")
 
-        uygun = [t for t in teklifler if (t[4] or 0) >= gereken_miktar]
-        if uygun:
-            uygun.sort(key=lambda t: (t[1] is None, t[1]))
-            tedarikci, fiyat, birim, stok = uygun[0][0], uygun[0][1], uygun[0][2], uygun[0][4]
-            fiyat_metni = f"{fiyat} {birim}"
-            maliyet_metni = f"{fiyat * gereken_miktar:.2f} {birim}"
+        # Yeterli stoğu olan teklifleri bul
+        stok_uygun_teklifler = [t for t in teklifler if (t[4] or 0) >= gereken_miktar]
+        
+        if stok_uygun_teklifler:
+            gecerli_adaylar = []
+            # Her tedarikçi için 'gereken_miktar'a uyan en ucuz fiyat kırılımını seç
+            tedarikciler = set([t[0] for t in stok_uygun_teklifler])
+            for ted in tedarikciler:
+                t_teklifleri = [t for t in stok_uygun_teklifler if t[0] == ted and t[1] is not None and t[1] > 0]
+                if not t_teklifleri: continue
+                
+                # Kırılım adedi (t[3]) ihtiyacımızdan küçük veya eşit olanları al
+                uygun_kirilimlar = [t for t in t_teklifleri if (t[3] or 1) <= gereken_miktar]
+                if uygun_kirilimlar:
+                    # Adet şartını sağlayan en yüksek kırılımı (en ucuz fiyatı) al
+                    uygun_kirilimlar.sort(key=lambda x: x[3], reverse=True)
+                    gecerli_adaylar.append(uygun_kirilimlar[0])
+                else:
+                    # İhtiyacımız satıcının en düşük MOQ'sundan bile azsa, mecbur en düşük MOQ fiyatını al
+                    t_teklifleri.sort(key=lambda x: x[3])
+                    gecerli_adaylar.append(t_teklifleri[0])
+            
+            if gecerli_adaylar:
+                # Elde edilen adaylar arasından en ucuz rakamı (kendi orijinal para birimiyle) seç
+                gecerli_adaylar.sort(key=lambda t: t[1])
+                tedarikci, fiyat, birim, _, stok, _ = gecerli_adaylar[0]
+                fiyat_metni = f"{fiyat} {birim}"
+                maliyet_metni = f"{fiyat * gereken_miktar:.2f} {birim}"
+            else:
+                tedarikci, fiyat_metni, maliyet_metni = "Kritik (Tek Kaynak Yetersiz)", "-", "-"
         else:
             tedarikci, fiyat_metni, maliyet_metni = "Kritik (Tek Kaynak Yetersiz)", "-", "-"
-
         temel = {
             "risk": risk, "karsilama": karsilama, "toplam_stok": toplam_stok,
             "uygun_tedarikci": tedarikci, "fiyat_metni": fiyat_metni, "maliyet_metni": maliyet_metni,
@@ -998,6 +1061,22 @@ if yuklenen_dosya:
                     if api_mfg and api_mfg != "-":
                         konsolide_df.at[idx, "Manufacturer"] = api_mfg
 
+            # Yeni Yardımcı: Adede göre fiyat kırılımını ve para birimini çeken fonksiyon
+            def tedarikci_adet_bazli_fiyat_bul(teklifler, tedarikci_adi, gereken):
+                t_list = [t for t in teklifler if tedarikci_adi.lower() in str(t[0]).lower() and t[1] is not None and t[1] > 0]
+                if not t_list:
+                    return "-"
+                
+                uygun_kirilimlar = [t for t in t_list if (t[3] or 1) <= gereken]
+                if uygun_kirilimlar:
+                    uygun_kirilimlar.sort(key=lambda x: x[3], reverse=True)
+                    secilen = uygun_kirilimlar[0]
+                else:
+                    t_list.sort(key=lambda x: x[3])
+                    secilen = t_list[0]
+                    
+                return f"{secilen[1]} {secilen[2]}" # Fiyat ve orijinal API para birimi
+
             def satir_isleyici(row):
                 mpn, birim_qty = row["MPN"], row["Qty"]
                 gereken = int(birim_qty) * int(uretim_adedi)
@@ -1006,18 +1085,29 @@ if yuklenen_dosya:
                 metrikler = parca_metriklerini_hesapla(sonuc, gereken, override=override)
                 durum = f"Hata: {sonuc['hata']}" if sonuc.get("hata") else ("Bulundu" if sonuc.get("bulundu") else "Bulunamadı")
 
+                m_stk = int(sonuc.get("mouser_stok") or 0)
+                n_stk = int(sonuc.get("nexar_stok") or 0)
+                e_stk = int(sonuc.get("ekom_stok") or 0)
+                gercek_kuresel_stok = m_stk + n_stk + e_stk if override.get("stok") is None else override["stok"]
+
+                # Distribütörlerin anlık fiyatlarını adet kırılımına ve orijinal para birimine göre al
+                teklif_listesi = sonuc.get("teklifler", [])
+                m_fiyat_guncel = tedarikci_adet_bazli_fiyat_bul(teklif_listesi, "Mouser", gereken)
+                n_fiyat_guncel = tedarikci_adet_bazli_fiyat_bul(teklif_listesi, "Nexar", gereken)
+                e_fiyat_guncel = tedarikci_adet_bazli_fiyat_bul(teklif_listesi, "Ekom", gereken)
+
                 return pd.Series([
                     durum,
                     sonuc.get("yasam_durumu_kategori", "Bilinmiyor"),
                     gereken,
-                    metrikler["toplam_stok"],
-                    sonuc.get("mouser_stok", 0),
-                    sonuc.get("mouser_fiyat", "-"),
-                    sonuc.get("nexar_stok", 0),
-                    sonuc.get("nexar_fiyat", "-"),
-                    sonuc.get("ekom_stok", 0),
-                    sonuc.get("ekom_fiyat", "-"),
-                    f"%{metrikler['karsilama']:.0f}",
+                    gercek_kuresel_stok,
+                    m_stk,
+                    m_fiyat_guncel,
+                    n_stk,
+                    n_fiyat_guncel,
+                    e_stk,
+                    e_fiyat_guncel,
+                    f"%{min((gercek_kuresel_stok / gereken * 100) if gereken > 0 else 0, 100):.0f}",
                     metrikler["uygun_tedarikci"],
                     metrikler["fiyat_metni"],
                     metrikler["maliyet_metni"],
