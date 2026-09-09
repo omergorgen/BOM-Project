@@ -81,6 +81,33 @@ payload = {"SearchByPartRequest": {"mouserPartNumber": mpn, "partSearchOptions":
 **Stokların sürekli 0 görünmesi:** Mouser yanıtında stok bilgisi tek bir formatta gelmeyebiliyor (`Availability` dille karışık metin, `AvailabilityInStock` düz sayısal string). Öneri: önce `AvailabilityInStock`/`FactoryStock` okunmalı, bulunamazsa `Availability` metninden regex ile sayı ayıklanmalı, ayrıca `AvailabilityOnOrder` (yoldaki sipariş) listesi de toplama dahil edilmeli.
 
 ---
+## ÖNEMLİ UYARI
+EKOM API ve NEXAR API resmi API'ler ile test edilmemiştir resmi apı girildiğinde streamlit sunucuları arka plan işçilerine izin vermeyebilir bu durumda Bu sorunu kalıcı olarak çözmek için şifreleri işçiye "parametre" olarak elden vermelisiniz. nexar istek atma kısmını aşşağıdaki kodla güncelleyebilirsiniz.  
+# Artık c_id ve c_sec dışarıdan (ana sistemden) gönderilecek
+def nexar_istek_at(mpn: str, c_id: str, c_sec: str) -> dict:
+    
+    print(f"\n[DEBUG-NEXAR] İstek Fonksiyonu Tetiklendi! MPN: {mpn}")
+    print(f"[DEBUG-NEXAR] Gelen Client ID: {c_id}")
+    print(f"[DEBUG-NEXAR] Gelen Client Secret: {c_sec}\n")
+    
+    if not c_id or not c_sec:
+        print("[NEXAR İPTAL] Şifreler fonksiyona ulaşmadı!")
+        return _bos_parca_sonucu("Nexar ID veya Secret eksik")
+
+    token, auth_hatasi = nexar_token_al(c_id, c_sec)
+    
+    # ... fonksiyonun geri kalanı aynı kalacak ...
+
+# kodu güncelledikten sonra hala arama yapmıyorsa;
+future_nexar nesnesini aşşağıdaki şekilde güncelleyin
+
+future_nexar = executor.submit
+    nexar_istek_at, 
+    mpn, 
+    st.session_state.get("nexar_client_id", ""), 
+    st.session_state.get("nexar_client_secret", "")
+
+# eğer hala arma yapmadıysa onu bende bilmiyorum :
 
 ## 2A. Veri Erişiminde None/KeyError Güvenliği (Genel Kural)
 
